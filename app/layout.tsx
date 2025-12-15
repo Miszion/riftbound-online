@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import type { ReactNode } from 'react'
 import Providers from './providers'
 import '../styles/globals.css'
+import GlobalLoadingOverlay from '@/components/ui/GlobalLoadingOverlay'
 
 export const metadata: Metadata = {
   title: 'Riftbound Online',
@@ -16,7 +17,10 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <Providers>{children}</Providers>
+        <Providers>
+          <GlobalLoadingOverlay />
+          {children}
+        </Providers>
       </body>
     </html>
   )

@@ -6,6 +6,7 @@ import { API_BASE_URL } from '@/lib/apiConfig'
 export interface AuthSession {
   userId: string
   email: string
+  username?: string
   idToken: string
   accessToken: string
   refreshToken: string
@@ -15,6 +16,7 @@ export interface AuthSession {
 interface SignInResponse {
   userId: string
   email: string
+  username?: string
   idToken: string
   accessToken: string
   refreshToken: string
@@ -41,11 +43,39 @@ interface AuthContextValue {
 
 const STORAGE_KEY = 'riftbound:user'
 
+const decodeJwtClaims = (token?: string): Record<string, any> | null => {
+  if (!token || typeof window === 'undefined' || typeof window.atob !== 'function') {
+    return null
+  }
+  try {
+    const parts = token.split('.')
+    if (parts.length < 2) return null
+    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=')
+    const json = window.atob(padded)
+    return JSON.parse(json)
+  } catch {
+    return null
+  }
+}
+
+const deriveUsername = (token?: string, fallback?: string): string | undefined => {
+  const claims = decodeJwtClaims(token)
+  return (
+    claims?.preferred_username ||
+    claims?.['cognito:username'] ||
+    claims?.username ||
+    fallback
+  )
+}
+
 const toSession = (payload: SignInResponse): AuthSession => {
   const fallbackExpiry = payload.expiresIn ? Date.now() + payload.expiresIn * 1000 : Date.now() + 3600 * 1000
+  const username = payload.username ?? deriveUsername(payload.idToken, payload.email)
   return {
     userId: payload.userId,
     email: payload.email,
+    username,
     idToken: payload.idToken,
     accessToken: payload.accessToken,
     refreshToken: payload.refreshToken,
@@ -145,6 +175,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const nextSession: AuthSession = {
       userId: response.userId || user.userId,
       email: user.email,
+       username: deriveUsername(response.idToken, user.username || user.email),
       idToken: response.idToken,
       accessToken: response.accessToken,
       refreshToken: response.refreshToken || user.refreshToken,

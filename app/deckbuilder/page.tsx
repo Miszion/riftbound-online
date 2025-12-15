@@ -12,6 +12,7 @@ import {
   useDeleteDecklist,
 } from '@/hooks/useGraphQL'
 import { useAuth } from '@/hooks/useAuth'
+import LoadingSpinner from '@/components/ui/LoadingSpinner'
 
 type CatalogCard = {
   id: string
@@ -48,7 +49,7 @@ type SavedDeck = {
 
 const MIN_DECK_CARDS = 40
 const MAX_COPIES = 3
-const MAX_RESULTS = 120
+const MAX_RESULTS = 180
 
 const domainFilters = ['all', 'fury', 'calm', 'mind', 'body', 'chaos', 'order']
 const typeFilters = ['all', 'creature', 'spell', 'artifact', 'enchantment']
@@ -64,11 +65,9 @@ export default function DeckbuilderPage() {
 
 function DeckbuilderView() {
   const { user } = useAuth()
-  const cardCatalogFilter = useMemo(() => ({ limit: 600 }), [])
-  const { data: catalogData, loading: catalogLoading, error: catalogError } = useCardCatalog(cardCatalogFilter)
-  const cards: CatalogCard[] = catalogData?.cardCatalog ?? []
-
   const userId = user?.userId ?? ''
+  const displayName = user?.username || user?.email || userId
+
   const [deckName, setDeckName] = useState('')
   const [activeDeckId, setActiveDeckId] = useState<string | null>(null)
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
@@ -77,8 +76,32 @@ function DeckbuilderView() {
   const [typeFilter, setTypeFilter] = useState('all')
   const [rarityFilter, setRarityFilter] = useState('all')
   const [pendingDeck, setPendingDeck] = useState<SavedDeck | null>(null)
-
+  const [focusedCard, setFocusedCard] = useState<CatalogCard | null>(null)
   const [deckEntries, setDeckEntries] = useState<Record<string, DeckEntry>>({})
+
+  const cardCatalogFilter = useMemo(
+    () => ({
+      limit: MAX_RESULTS,
+      search: search.trim() || undefined,
+      domain: domainFilter !== 'all' ? domainFilter : undefined,
+      type: typeFilter !== 'all' ? typeFilter : undefined,
+      rarity: rarityFilter !== 'all' ? rarityFilter : undefined,
+    }),
+    [search, domainFilter, typeFilter, rarityFilter]
+  )
+
+  const {
+    data: catalogData,
+    loading: catalogLoading,
+    error: catalogError,
+  } = useCardCatalog(cardCatalogFilter)
+  const cards: CatalogCard[] = catalogData?.cardCatalog ?? []
+
+  useEffect(() => {
+    if (!focusedCard && cards.length) {
+      setFocusedCard(cards[0])
+    }
+  }, [cards, focusedCard])
 
   const { data: decklistsData, loading: decklistsLoading, refetch: refetchDecklists } = useDecklists(userId || null)
   const decklists: SavedDeck[] = (decklistsData?.decklists ?? []) as SavedDeck[]
@@ -94,37 +117,19 @@ function DeckbuilderView() {
   const canSaveDeck = Boolean(userId) && deckName.trim().length > 0 && totalCards >= MIN_DECK_CARDS
 
   const filteredCards = useMemo(() => {
+    if (!search.trim()) {
+      return cards.slice(0, MAX_RESULTS)
+    }
     const term = search.trim().toLowerCase()
     return cards
       .filter((card) => {
-        if (term) {
-          const matchesName = card.name.toLowerCase().includes(term)
-          const matchesEffect = card.effect.toLowerCase().includes(term)
-          const matchesKeywords = card.keywords?.some((keyword) => keyword.toLowerCase().includes(term))
-          if (!matchesName && !matchesEffect && !matchesKeywords) {
-            return false
-          }
-        }
-
-        if (domainFilter !== 'all') {
-          const matchesDomain = card.colors?.some((color) => color.toLowerCase() === domainFilter)
-          if (!matchesDomain) {
-            return false
-          }
-        }
-
-        if (typeFilter !== 'all' && card.type?.toLowerCase() !== typeFilter) {
-          return false
-        }
-
-        if (rarityFilter !== 'all' && card.rarity?.toLowerCase() !== rarityFilter) {
-          return false
-        }
-
-        return true
+        const matchesName = card.name.toLowerCase().includes(term)
+        const matchesEffect = card.effect.toLowerCase().includes(term)
+        const matchesKeywords = card.keywords?.some((keyword) => keyword.toLowerCase().includes(term))
+        return matchesName || matchesEffect || matchesKeywords
       })
       .slice(0, MAX_RESULTS)
-  }, [cards, search, domainFilter, typeFilter, rarityFilter])
+  }, [cards, search])
 
   const resolveCatalogCard = (entry?: { cardId?: string | null; slug?: string | null }) => {
     if (!entry) {
@@ -156,6 +161,7 @@ function DeckbuilderView() {
         }
       })
       setDeckEntries(restored)
+      setFocusedCard(Object.values(restored)[0]?.card ?? null)
       setPendingDeck(null)
     }
   }, [pendingDeck, cards])
@@ -175,6 +181,7 @@ function DeckbuilderView() {
         },
       }
     })
+    setFocusedCard(card)
     setStatusMessage(null)
   }
 
@@ -202,6 +209,7 @@ function DeckbuilderView() {
     setDeckEntries({})
     setDeckName('')
     setActiveDeckId(null)
+    setFocusedCard(null)
     setStatusMessage(null)
   }
 
@@ -220,6 +228,7 @@ function DeckbuilderView() {
         }
       })
       setDeckEntries(restored)
+      setFocusedCard(Object.values(restored)[0]?.card ?? null)
     }
     setDeckName(deck.name)
     setActiveDeckId(deck.deckId)
@@ -291,86 +300,260 @@ function DeckbuilderView() {
       <main className="deckbuilder container">
         <div className="deckbuilder-header">
           <div>
-            <h2>Deckbuilder</h2>
+            <h2>Deck Studio</h2>
             <p className="muted">
-              Browse the card catalog, drag cards into your list, and save decks directly to your Riftbound profile.
+              Build, tune, and save decks directly to your Riftbound profile. Click cards to inspect them or add them
+              into the grid.
             </p>
           </div>
-          <div className="status-message" aria-live="polite">
-            {statusMessage}
+          <div className="deck-pillar">
+            {[
+              { label: 'Main', value: totalCards, min: MIN_DECK_CARDS },
+              { label: 'Side', value: 0 },
+              { label: 'Extra', value: 0 },
+            ].map((entry) => (
+              <div key={entry.label} className="deck-pillar-segment">
+                <span className="deck-pillar-value">{String(entry.value).padStart(2, '0')}</span>
+                <span className="deck-pillar-label">{entry.label}</span>
+                {entry.min && <span className="deck-pillar-min">min {entry.min}</span>}
+              </div>
+            ))}
           </div>
         </div>
 
-        <section className="deckbuilder-controls">
-          <div className="user-context">
-            <span className="muted small">Signed in as</span>
-            <strong>{user?.email ?? userId}</strong>
-            <span className="muted small">User ID: {userId}</span>
-          </div>
-          <label>
-            Deck name
-            <input
-              type="text"
-              placeholder="Name this deck"
-              value={deckName}
-              onChange={(event) => setDeckName(event.target.value)}
-            />
-          </label>
-          <label>
-            Search catalog
-            <input
-              type="text"
-              placeholder="Card name, effect, keyword"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-            />
-          </label>
-          <div className="filter-row">
-            <label>
-              Domain
-              <select value={domainFilter} onChange={(event) => setDomainFilter(event.target.value)}>
-                {domainFilters.map((domain) => (
-                  <option key={domain} value={domain}>
-                    {domain === 'all' ? 'All domains' : domain}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Type
-              <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
-                {typeFilters.map((type) => (
-                  <option key={type} value={type}>
-                    {type === 'all' ? 'All types' : type}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Rarity
-              <select value={rarityFilter} onChange={(event) => setRarityFilter(event.target.value)}>
-                {rarityFilters.map((rarity) => (
-                  <option key={rarity} value={rarity}>
-                    {rarity === 'all' ? 'All rarities' : rarity}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-        </section>
-
-        <section className="deckbuilder-layout">
-          <div className="catalog-panel">
-            <div className="panel-heading">
-              <h3>Card catalog</h3>
-              {catalogLoading && <span className="muted small">Loading cards…</span>}
-              {catalogError && <span className="error">Failed to load cards.</span>}
+        <section className="deckbuilder-shell">
+          <aside className="card-spotlight">
+            <div className="spotlight-card">
+              {focusedCard ? (
+                <>
+                  <div className="spotlight-card-media">
+                    {focusedCard.assets?.remote ? (
+                      <Image
+                        src={focusedCard.assets.remote}
+                        alt={focusedCard.name}
+                        width={260}
+                        height={360}
+                        loading="lazy"
+                        unoptimized
+                      />
+                    ) : (
+                      <div className="image-fallback large">{focusedCard.name.slice(0, 1)}</div>
+                    )}
+                  </div>
+                  <div className="spotlight-card-body">
+                    <h3>{focusedCard.name}</h3>
+                    <p className="muted small">{focusedCard.type ?? 'Spell'} · {focusedCard.rarity ?? 'Unknown rarity'}</p>
+                    <p className="spotlight-card-text">{focusedCard.effect}</p>
+                    {focusedCard.keywords?.length > 0 && (
+                      <div className="keyword-row">
+                        {focusedCard.keywords.slice(0, 6).map((keyword) => (
+                          <span key={keyword} className="pill">
+                            {keyword}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="card-placeholder">Select any card to inspect it.</div>
+              )}
             </div>
-            <div className="card-catalog-grid">
+
+            <div className="spotlight-meta">
+              <label>
+                Deck name
+                <input
+                  type="text"
+                  placeholder="Name this deck"
+                  value={deckName}
+                  onChange={(event) => setDeckName(event.target.value)}
+                />
+              </label>
+              <div className="user-context">
+                <span className="muted small">Signed in as</span>
+                <strong>{displayName}</strong>
+                <span className="muted small">User ID: {userId}</span>
+              </div>
+              <div className="spotlight-actions">
+                <button className="btn-link" onClick={handleResetDeck}>
+                  New deck
+                </button>
+                <button className="cta" disabled={!canSaveDeck || savingDeck} onClick={handleSaveDeck}>
+                  {savingDeck ? 'Saving…' : activeDeckId ? 'Update deck' : 'Save deck'}
+                </button>
+              </div>
+              <div className="status-message" aria-live="polite">
+                {statusMessage}
+              </div>
+            </div>
+
+            <div className="saved-decks-panel">
+              <div className="panel-heading">
+                <h4>Saved decks</h4>
+                {decklistsLoading && <LoadingSpinner size="sm" />}
+              </div>
+              {!userId && <p className="muted small">Sign in to load saved decks.</p>}
+              {userId && !decklistsLoading && decklists.length === 0 && (
+                <p className="muted small">No decks saved yet.</p>
+              )}
+              <ul>
+                {decklists.map((deck) => (
+                  <li key={deck.deckId}>
+                    <button onClick={() => handleLoadDeck(deck)} className="saved-deck-button">
+                      <strong>{deck.name}</strong>
+                      <span className="muted small">{deck.cards?.length ?? 0} cards</span>
+                    </button>
+                    <button onClick={() => handleDeleteDeck(deck)} disabled={deletingDeck}>
+                      Delete
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </aside>
+
+          <section className="deck-canvas">
+            <div className="deck-track deck-track-main">
+              <div className="panel-heading">
+                <h3>Main deck</h3>
+                <span className="muted small">
+                  {totalCards} / {MIN_DECK_CARDS}
+                </span>
+              </div>
+              {totalCards < MIN_DECK_CARDS && (
+                <p className="muted small">Add {MIN_DECK_CARDS - totalCards} more card(s) to hit the minimum.</p>
+              )}
+              <div className="deck-grid">
+                {deckCards.map(({ card, quantity }) => (
+                  <div
+                    key={card.id}
+                    className="deck-card"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setFocusedCard(card)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        setFocusedCard(card)
+                      }
+                    }}
+                  >
+                    <div className="deck-card-thumb">
+                      {card.assets?.remote ? (
+                        <Image
+                          src={card.assets.remote}
+                          alt={card.name}
+                          width={80}
+                          height={110}
+                          loading="lazy"
+                          unoptimized
+                        />
+                      ) : (
+                        <div className="image-fallback">{card.name.slice(0, 1)}</div>
+                      )}
+                      <span className="deck-card-qty">{quantity}x</span>
+                    </div>
+                    <div className="deck-card-meta">
+                      <strong>{card.name}</strong>
+                      <span className="muted small">{card.type ?? 'Spell'}</span>
+                    </div>
+                    <div className="deck-card-controls">
+                      <button
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          handleRemoveCard(card.id)
+                        }}
+                      >
+                        −
+                      </button>
+                      <button
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          handleAddCard(card)
+                        }}
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {!deckCards.length && !catalogLoading && (
+                  <div className="card-placeholder muted small">Select cards from the search panel to start building.</div>
+                )}
+              </div>
+            </div>
+
+            <div className="deck-track deck-track-side">
+              <div className="panel-heading">
+                <h3>Side deck</h3>
+                <span className="muted small">Coming soon</span>
+              </div>
+              <p className="muted small">Side deck management will arrive in a future update.</p>
+            </div>
+
+            <div className="deck-track deck-track-extra">
+              <div className="panel-heading">
+                <h3>Extra deck</h3>
+                <span className="muted small">Coming soon</span>
+              </div>
+              <p className="muted small">Keep an eye on this space for rune / extra deck tools.</p>
+            </div>
+          </section>
+
+          <aside className="search-panel">
+            <div className="panel-heading">
+              <h3>Search catalog</h3>
+              {catalogLoading && <LoadingSpinner size="sm" />}
+            </div>
+            {catalogError && <p className="error small">Failed to load cards. Try again later.</p>}
+            <form className="search-form" onSubmit={(event) => event.preventDefault()}>
+              <label>
+                Search
+                <input
+                  type="text"
+                  placeholder="Card name, keyword, effect"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                />
+              </label>
+              <label>
+                Domain
+                <select value={domainFilter} onChange={(event) => setDomainFilter(event.target.value)}>
+                  {domainFilters.map((domain) => (
+                    <option key={domain} value={domain}>
+                      {domain === 'all' ? 'All domains' : domain}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Type
+                <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
+                  {typeFilters.map((type) => (
+                    <option key={type} value={type}>
+                      {type === 'all' ? 'All types' : type}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Rarity
+                <select value={rarityFilter} onChange={(event) => setRarityFilter(event.target.value)}>
+                  {rarityFilters.map((rarity) => (
+                    <option key={rarity} value={rarity}>
+                      {rarity === 'all' ? 'All rarities' : rarity}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </form>
+
+            <div className="search-results">
               {filteredCards.map((card) => (
                 <article
                   key={card.id}
-                  className="card-preview"
+                  className="search-result-card"
                   role="button"
                   tabIndex={0}
                   onClick={() => handleAddCard(card)}
@@ -381,33 +564,17 @@ function DeckbuilderView() {
                     }
                   }}
                 >
-                  <div className="card-image">
-                    {card.assets?.remote ? (
-                      <Image
-                        src={card.assets.remote}
-                        alt={card.name}
-                        width={180}
-                        height={250}
-                        loading="lazy"
-                        unoptimized
-                      />
-                    ) : (
-                      <div className="image-fallback">{card.name.slice(0, 1)}</div>
-                    )}
+                  <div className="search-card-header">
+                    <strong>{card.name}</strong>
+                    <span className="pill">{card.type ?? 'Spell'}</span>
                   </div>
-                  <div className="card-info">
-                    <div className="card-title-row">
-                      <h4>{card.name}</h4>
-                      <span className="pill">{card.type ?? 'Spell'}</span>
-                    </div>
-                    <p className="muted small">{card.effect}</p>
-                    <div className="keyword-row">
-                      {card.keywords?.slice(0, 3).map((keyword) => (
-                        <span key={keyword} className="pill muted">
-                          {keyword}
-                        </span>
-                      ))}
-                    </div>
+                  <p className="search-card-effect">{card.effect}</p>
+                  <div className="search-card-tags">
+                    {card.keywords?.slice(0, 3).map((keyword) => (
+                      <span key={keyword} className="pill muted">
+                        {keyword}
+                      </span>
+                    ))}
                   </div>
                 </article>
               ))}
@@ -415,73 +582,7 @@ function DeckbuilderView() {
                 <p className="muted small">No cards match your filters.</p>
               )}
             </div>
-          </div>
-
-          <div className="deck-panel">
-            <div className="panel-heading">
-              <h3>Deck list ({totalCards} / {MIN_DECK_CARDS})</h3>
-              <div className="deck-panel-actions">
-                <button className="btn-link" onClick={handleResetDeck}>
-                  New deck
-                </button>
-                <button
-                  className="cta"
-                  disabled={!canSaveDeck || savingDeck}
-                  onClick={handleSaveDeck}
-                >
-                  {savingDeck ? 'Saving…' : activeDeckId ? 'Update deck' : 'Save deck'}
-                </button>
-              </div>
-            </div>
-            {totalCards < MIN_DECK_CARDS && (
-              <p className="muted small">
-                Add {MIN_DECK_CARDS - totalCards} more card(s) to hit the minimum deck size.
-              </p>
-            )}
-            <ul className="decklist">
-              {deckCards.map(({ card, quantity }) => (
-                <li key={card.id}>
-                  <div>
-                    <strong>{card.name}</strong>
-                    <span className="muted small">
-                      {card.type ?? 'Spell'} · {card.colors?.join(', ') || 'Neutral'}
-                    </span>
-                  </div>
-                  <div className="deck-controls">
-                    <button onClick={() => handleRemoveCard(card.id)}>-</button>
-                    <span>{quantity}</span>
-                    <button onClick={() => handleAddCard(card)}>+</button>
-                  </div>
-                </li>
-              ))}
-              {!deckCards.length && <li className="muted small">Select cards to start building your deck.</li>}
-            </ul>
-
-            <div className="saved-decks">
-              <h4>Saved decks</h4>
-              {!userId && <p className="muted small">Sign in to load saved decks.</p>}
-              {userId && decklistsLoading && <p className="muted small">Loading decks...</p>}
-              {userId && !decklistsLoading && decklists.length === 0 && (
-                <p className="muted small">No decks saved yet.</p>
-              )}
-              <ul>
-                {decklists.map((deck) => (
-                  <li key={deck.deckId}>
-                    <div>
-                      <strong>{deck.name}</strong>
-                      <span className="muted small">{deck.cards?.length ?? 0} cards saved</span>
-                    </div>
-                    <div className="saved-deck-actions">
-                      <button onClick={() => handleLoadDeck(deck)}>Load</button>
-                      <button onClick={() => handleDeleteDeck(deck)} disabled={deletingDeck}>
-                        Delete
-                      </button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
+          </aside>
         </section>
       </main>
       <Footer />

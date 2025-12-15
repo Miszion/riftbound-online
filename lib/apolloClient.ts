@@ -1,9 +1,10 @@
-import { ApolloClient, InMemoryCache, HttpLink, split } from '@apollo/client';
+import { ApolloClient, InMemoryCache, HttpLink, split, ApolloLink, Observable } from '@apollo/client';
 import { setContext } from '@apollo/client/link/context';
 import { GraphQLWsLink } from '@apollo/client/link/subscriptions';
 import { getMainDefinition } from '@apollo/client/utilities';
 import { createClient } from 'graphql-ws';
 import { GRAPHQL_HTTP_URL, GRAPHQL_WS_URL } from '@/lib/apiConfig';
+import { networkActivity } from '@/lib/networkActivity';
 
 const httpLink = new HttpLink({
   uri: GRAPHQL_HTTP_URL,
@@ -56,6 +57,32 @@ const wsLink = new GraphQLWsLink(
   })
 );
 
+const activityLink = new ApolloLink((operation, forward) => {
+  if (!forward) {
+    return null;
+  }
+  networkActivity.start();
+  return new Observable((observer) => {
+    const subscription = forward(operation).subscribe({
+      next: (result) => observer.next(result),
+      error: (error) => {
+        networkActivity.stop();
+        observer.error(error);
+      },
+      complete: () => {
+        networkActivity.stop();
+        observer.complete();
+      },
+    });
+    return () => {
+      networkActivity.stop();
+      subscription.unsubscribe();
+    };
+  });
+});
+
+const httpWithActivity = ApolloLink.from([activityLink, authLink, httpLink]);
+
 // Use wsLink for subscriptions, httpLink for queries and mutations
 const splitLink = split(
   ({ query }) => {
@@ -66,7 +93,7 @@ const splitLink = split(
     );
   },
   wsLink,
-  authLink.concat(httpLink)
+  httpWithActivity
 );
 
 // Create Apollo Client instance

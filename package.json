@@ -5,8 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "build:static": "next build && next export",
-    "deploy:dev": "npm run build:static && aws s3 sync ./out $DEPLOY_BUCKET --delete && aws cloudfront create-invalidation --distribution-id $CLOUDFRONT_DISTRIBUTION_ID --paths \"/*\"",
+    "build:static": "next build",
+    "deploy:dev": "scripts/deploy-ui.sh",
     "start": "next start",
     "lint": "next lint"
   },
@@ -23,6 +23,5 @@
     "@types/node": "^20.9.0",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0"
-  },
-  "export": "next export" 
+  }
 }

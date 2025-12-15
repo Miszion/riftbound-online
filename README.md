@@ -40,6 +40,20 @@ styles/
 npm install
 ```
 
+### Environment Configuration
+
+Create or update `.env` in the project root to point the UI at your backend:
+
+```bash
+NEXT_PUBLIC_API_BASE_URL=https://your-backend-alb-or-cloudfront
+NEXT_PUBLIC_WS_BASE_URL=wss://your-backend-alb-or-cloudfront/graphql
+# Optional granular overrides:
+# NEXT_PUBLIC_API_HOST=your-backend-hostname
+# NEXT_PUBLIC_API_PORT=80
+# NEXT_PUBLIC_WS_HOST=your-backend-hostname
+# NEXT_PUBLIC_WS_PORT=80
+```
+
 ### Development
 
 Run the development server:
@@ -52,44 +66,20 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ### Build & Deploy
 
-```bash
-npm run build
-npm start
-```
-
-## AWS Deployment (Dev)
-
-The `/infrastructure/cdk` folder contains an AWS CDK stack that creates an S3 bucket and CloudFront distribution for the UI. A matching CDK app in `riftbound-online-backend` manages the service-side infrastructure.
-
-### Frontend (UI)
+Static export:
 
 ```bash
-cd infrastructure/cdk
-npm install
-npm run cdk -- bootstrap -c stage=dev
-npm run deploy -- -c stage=dev
+npm run build:static    # next build (with output: 'export') → ./out
 ```
 
-Deployment outputs include the bucket name and CloudFront distribution ID/domain. Deploy new builds with:
+Deploy to S3/CloudFront with the helper script (`npm run deploy:dev` calls `npm run build:static`, syncs `./out` to S3, then invalidates CloudFront):
 
 ```bash
-npm run build
-aws s3 sync ./out s3://<SiteBucketName> --delete
-aws cloudfront create-invalidation --distribution-id <DistributionId> --paths "/*"
+# prerequisites: AWS CLI configured with access to your bucket/distribution
+export DEPLOY_BUCKET=s3://your-ui-bucket
+export CLOUDFRONT_DISTRIBUTION_ID=YOUR_DIST_ID
+npm run deploy:dev
 ```
-
-### Backend (Match Service)
-
-```bash
-cd ../riftbound-online-backend
-npm install
-cd cdk
-npm install
-npm run cdk -- bootstrap -c stage=dev
-npm run deploy -- -c stage=dev
-```
-
-After the backend deploys, configure the UI with the emitted API/WS endpoints (`NEXT_PUBLIC_API_HOST`, `NEXT_PUBLIC_API_PORT`, `NEXT_PUBLIC_WS_HOST`, `NEXT_PUBLIC_WS_PORT`) so Deckbuilder, Matchmaking, and Spectator pages can reach the GraphQL service.
 
 ## Deckbuilder
 
