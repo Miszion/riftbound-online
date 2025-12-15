@@ -1,23 +1,58 @@
 import { ApolloClient, InMemoryCache, HttpLink, split } from '@apollo/client';
+import { setContext } from '@apollo/client/link/context';
 import { GraphQLWsLink } from '@apollo/client/link/subscriptions';
 import { getMainDefinition } from '@apollo/client/utilities';
 import { createClient } from 'graphql-ws';
-
-// Determine the API URLs based on environment
-const apiHost = process.env.NEXT_PUBLIC_API_HOST || 'localhost';
-const apiPort = process.env.NEXT_PUBLIC_API_PORT || '3000';
-const wsHost = process.env.NEXT_PUBLIC_WS_HOST || apiHost;
-const wsPort = process.env.NEXT_PUBLIC_WS_PORT || apiPort;
+import { GRAPHQL_HTTP_URL, GRAPHQL_WS_URL } from '@/lib/apiConfig';
 
 const httpLink = new HttpLink({
-  uri: `http://${apiHost}:${apiPort}/graphql`,
+  uri: GRAPHQL_HTTP_URL,
   credentials: 'include',
+});
+
+const authLink = setContext((_, { headers }) => {
+  if (typeof window === 'undefined') {
+    return { headers };
+  }
+  try {
+    const stored = window.localStorage.getItem('riftbound:user');
+    if (!stored) {
+      return { headers };
+    }
+    const session = JSON.parse(stored);
+    if (!session?.userId) {
+      return { headers };
+    }
+    return {
+      headers: {
+        ...headers,
+        'x-user-id': session.userId,
+      },
+    };
+  } catch {
+    return { headers };
+  }
 });
 
 // Create WebSocket link for subscriptions
 const wsLink = new GraphQLWsLink(
   createClient({
-    url: `ws://${wsHost}:${wsPort}/graphql`,
+    url: GRAPHQL_WS_URL,
+    connectionParams: () => {
+      if (typeof window === 'undefined') {
+        return {};
+      }
+      try {
+        const stored = window.localStorage.getItem('riftbound:user');
+        if (!stored) {
+          return {};
+        }
+        const session = JSON.parse(stored);
+        return session?.userId ? { 'x-user-id': session.userId } : {};
+      } catch {
+        return {};
+      }
+    },
   })
 );
 
@@ -31,7 +66,7 @@ const splitLink = split(
     );
   },
   wsLink,
-  httpLink
+  authLink.concat(httpLink)
 );
 
 // Create Apollo Client instance

@@ -1,4 +1,9 @@
 import { gql } from '@apollo/client';
+import {
+  CARD_STATE_FIELDS,
+  PLAYER_BOARD_FIELDS,
+  PLAYER_STATE_FIELDS,
+} from '@/lib/graphql/fragments';
 
 // ============================================================================
 // USER QUERIES
@@ -36,79 +41,51 @@ export const GET_LEADERBOARD = gql`
 // ============================================================================
 
 export const GET_MATCH = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
   query GetMatch($matchId: ID!) {
     match(matchId: $matchId) {
       matchId
+      winner
+      victoryScore
+      endReason
       players {
-        playerId
-        health
-        maxHealth
-        mana
-        maxMana
-        hand {
-          cardId
-          name
-          cost
-          power
-          toughness
-          type
-        }
-        board {
-          cardId
-          name
-          cost
-          power
-          toughness
-          type
-        }
+        ...PlayerStateFields
       }
       currentPhase
       turnNumber
       currentPlayerIndex
       status
       timestamp
+      moveHistory
+      scoreLog {
+        playerId
+        amount
+        reason
+        sourceCardId
+        timestamp
+      }
     }
   }
 `;
 
 export const GET_PLAYER_MATCH = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
+  ${PLAYER_BOARD_FIELDS}
   query GetPlayerMatch($matchId: ID!, $playerId: ID!) {
     playerMatch(matchId: $matchId, playerId: $playerId) {
       matchId
       currentPlayer {
-        playerId
-        health
-        maxHealth
-        mana
-        maxMana
-        hand {
-          cardId
-          name
-          cost
-          power
-          toughness
-          type
-        }
-        board {
-          cardId
-          name
-          cost
-          power
-          toughness
-          type
-        }
+        ...PlayerStateFields
       }
       opponent {
         playerId
-        health
+        victoryPoints
+        victoryScore
         handSize
         board {
-          cardId
-          name
-          cost
-          power
-          toughness
-          type
+          ...PlayerBoardStateFields
         }
       }
       gameState {
@@ -188,6 +165,8 @@ export const UPDATE_USER = gql`
 // ============================================================================
 
 export const INIT_MATCH = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
   mutation InitMatch(
     $matchId: ID!
     $player1: ID!
@@ -206,11 +185,7 @@ export const INIT_MATCH = gql`
       gameState {
         matchId
         players {
-          playerId
-          health
-          maxHealth
-          mana
-          maxMana
+          ...PlayerStateFields
         }
         currentPhase
         turnNumber
@@ -222,6 +197,8 @@ export const INIT_MATCH = gql`
 `;
 
 export const PLAY_CARD = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
   mutation PlayCard(
     $matchId: ID!
     $playerId: ID!
@@ -238,22 +215,7 @@ export const PLAY_CARD = gql`
       gameState {
         matchId
         players {
-          playerId
-          health
-          maxHealth
-          mana
-          maxMana
-          hand {
-            cardId
-            name
-            cost
-          }
-          board {
-            cardId
-            name
-            power
-            toughness
-          }
+          ...PlayerStateFields
         }
         currentPhase
         turnNumber
@@ -266,6 +228,8 @@ export const PLAY_CARD = gql`
 `;
 
 export const ATTACK = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
   mutation Attack(
     $matchId: ID!
     $playerId: ID!
@@ -282,15 +246,7 @@ export const ATTACK = gql`
       gameState {
         matchId
         players {
-          playerId
-          health
-          maxHealth
-          board {
-            cardId
-            name
-            power
-            toughness
-          }
+          ...PlayerStateFields
         }
         currentPhase
         turnNumber
@@ -303,19 +259,15 @@ export const ATTACK = gql`
 `;
 
 export const NEXT_PHASE = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
   mutation NextPhase($matchId: ID!, $playerId: ID!) {
     nextPhase(matchId: $matchId, playerId: $playerId) {
       success
       gameState {
         matchId
         players {
-          playerId
-          health
-          mana
-          maxMana
-          hand {
-            cardId
-          }
+          ...PlayerStateFields
         }
         currentPhase
         turnNumber
@@ -364,6 +316,164 @@ export const CONCEDE_MATCH = gql`
         duration
         turns
       }
+    }
+  }
+`;
+
+// ============================================================================
+// CARD CATALOG & DECKLIST QUERIES
+// ============================================================================
+
+export const GET_CARD_CATALOG = gql`
+  query CardCatalog($filter: CardCatalogFilter) {
+    cardCatalog(filter: $filter) {
+      id
+      slug
+      name
+      type
+      rarity
+      colors
+      keywords
+      effect
+      activation {
+        timing
+        stateful
+      }
+      assets {
+        remote
+        localPath
+      }
+    }
+  }
+`;
+
+export const GET_DECKLISTS = gql`
+  query Decklists($userId: ID!) {
+    decklists(userId: $userId) {
+      deckId
+      userId
+      name
+      description
+      heroSlug
+      format
+      tags
+      isPublic
+      cardCount
+      cards {
+        cardId
+        slug
+        quantity
+      }
+      runeDeck {
+        cardId
+        slug
+        quantity
+      }
+      createdAt
+      updatedAt
+    }
+  }
+`;
+
+export const SAVE_DECKLIST = gql`
+  mutation SaveDecklist($input: DecklistInput!) {
+    saveDecklist(input: $input) {
+      deckId
+      userId
+      name
+      description
+      heroSlug
+      format
+      tags
+      isPublic
+      cardCount
+      cards {
+        cardId
+        slug
+        quantity
+      }
+      runeDeck {
+        cardId
+        slug
+        quantity
+      }
+      createdAt
+      updatedAt
+    }
+  }
+`;
+
+export const DELETE_DECKLIST = gql`
+  mutation DeleteDecklist($userId: ID!, $deckId: ID!) {
+    deleteDecklist(userId: $userId, deckId: $deckId)
+  }
+`;
+
+export const GET_MATCHMAKING_STATUS = gql`
+  query MatchmakingStatus($userId: ID!, $mode: MatchMode!) {
+    matchmakingStatus(userId: $userId, mode: $mode) {
+      mode
+      state
+      queued
+      mmr
+      queuedAt
+      estimatedWaitSeconds
+      matchId
+      opponentId
+    }
+  }
+`;
+
+export const JOIN_MATCHMAKING_QUEUE = gql`
+  mutation JoinMatchmakingQueue($input: MatchmakingQueueInput!) {
+    joinMatchmakingQueue(input: $input) {
+      mode
+      queued
+      matchFound
+      matchId
+      opponentId
+      mmr
+      estimatedWaitSeconds
+    }
+  }
+`;
+
+export const LEAVE_MATCHMAKING_QUEUE = gql`
+  mutation LeaveMatchmakingQueue($userId: ID!, $mode: MatchMode!) {
+    leaveMatchmakingQueue(userId: $userId, mode: $mode)
+  }
+`;
+
+// ============================================================================
+// SPECTATOR & REPLAYS
+// ============================================================================
+
+export const GET_MATCH_REPLAY = gql`
+  query MatchReplay($matchId: ID!) {
+    matchReplay(matchId: $matchId) {
+      matchId
+      players
+      winner
+      loser
+      duration
+      turns
+      moves
+      finalState
+      createdAt
+    }
+  }
+`;
+
+export const GET_RECENT_MATCHES = gql`
+  query RecentMatches($limit: Int) {
+    recentMatches(limit: $limit) {
+      matchId
+      players
+      winner
+      loser
+      duration
+      turns
+      createdAt
     }
   }
 `;

@@ -1,0 +1,8 @@
+{
+  "app": "npx ts-node --prefer-ts-exts bin/riftbound-ui-infra.ts",
+  "context": {
+    "@aws-cdk/core:newStyleStackSynthesis": true,
+    "@aws-cdk/aws-s3:grantWriteWithoutAcl": true,
+    "stage": "dev"
+  }
+}

@@ -212,7 +212,7 @@ const deriveReactionWindows = (effect: string): string[] => {
 const deriveTiming = (effect: string): ActivationTiming => {
   if (/^ACTION\b/i.test(effect) || /\bACTION\b/i.test(effect)) return 'action';
   if (/^REACTION\b/i.test(effect) || /\bREACTION\b/i.test(effect)) return 'reaction';
-  if (/\bWhen\b|\bWhenever\b/i test(effect)) return 'triggered';
+  if (/\b(When|Whenever)\b/i.test(effect)) return 'triggered';
   return 'passive';
 };
 

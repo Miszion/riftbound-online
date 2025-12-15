@@ -13,6 +13,15 @@ import {
   NEXT_PHASE,
   REPORT_MATCH_RESULT,
   CONCEDE_MATCH,
+  GET_CARD_CATALOG,
+  GET_DECKLISTS,
+  SAVE_DECKLIST,
+  DELETE_DECKLIST,
+  GET_MATCHMAKING_STATUS,
+  JOIN_MATCHMAKING_QUEUE,
+  LEAVE_MATCHMAKING_QUEUE,
+  GET_MATCH_REPLAY,
+  GET_RECENT_MATCHES,
 } from '@/lib/graphql/queries';
 import {
   GAME_STATE_CHANGED,
@@ -103,6 +112,69 @@ export function useReportMatchResult() {
 
 export function useConcedeMatch() {
   return useMutation(CONCEDE_MATCH);
+}
+
+// ============================================================================
+// CARD CATALOG & DECKLIST HOOKS
+// ============================================================================
+
+export function useCardCatalog(filter?: Record<string, unknown>) {
+  return useQuery(GET_CARD_CATALOG, {
+    variables: { filter },
+  });
+}
+
+export function useDecklists(userId: string | null) {
+  return useQuery(GET_DECKLISTS, {
+    variables: { userId: userId || '' },
+    skip: !userId,
+    fetchPolicy: 'cache-and-network',
+  });
+}
+
+export function useSaveDecklist() {
+  return useMutation(SAVE_DECKLIST);
+}
+
+export function useDeleteDecklist() {
+  return useMutation(DELETE_DECKLIST);
+}
+
+export function useMatchmakingStatus(
+  userId: string | null,
+  mode: 'ranked' | 'free',
+  pollInterval = 5000
+) {
+  return useQuery(GET_MATCHMAKING_STATUS, {
+    variables: { userId: userId || '', mode },
+    skip: !userId,
+    pollInterval: userId ? pollInterval : undefined,
+  });
+}
+
+export function useJoinMatchmakingQueue() {
+  return useMutation(JOIN_MATCHMAKING_QUEUE);
+}
+
+export function useLeaveMatchmakingQueue() {
+  return useMutation(LEAVE_MATCHMAKING_QUEUE);
+}
+
+// ============================================================================
+// SPECTATOR / REPLAY HOOKS
+// ============================================================================
+
+export function useMatchReplay(matchId: string | null) {
+  return useQuery(GET_MATCH_REPLAY, {
+    variables: { matchId: matchId || '' },
+    skip: !matchId,
+  });
+}
+
+export function useRecentMatches(limit = 10) {
+  return useQuery(GET_RECENT_MATCHES, {
+    variables: { limit },
+  });
 }
 
 // ============================================================================

@@ -24,8 +24,8 @@ type CardInstance = {
 
 type PlayerDetails = {
   playerId: string;
-  health: number;
-  maxHealth?: number;
+  victoryPoints: number;
+  victoryScore?: number;
   mana?: number;
   maxMana?: number;
   hand?: CardInstance[] | null;
@@ -131,7 +131,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const opponentHandSize = opponent.handSize ?? opponentBoard.length;
   const playerBoard: CardInstance[] = currentPlayer.board ?? [];
   const playerHand: CardInstance[] = currentPlayer.hand ?? [];
-  const playerMaxHealth = currentPlayer.maxHealth ?? currentPlayer.health;
+  const opponentScoreCap = opponent.victoryScore ?? currentPlayer.victoryScore ?? 8;
+  const playerVictoryScore = currentPlayer.victoryScore ?? opponentScoreCap ?? 8;
   const playerMaxMana = currentPlayer.maxMana ?? currentPlayer.mana ?? 0;
   const playerMana = currentPlayer.mana ?? 0;
 
@@ -151,7 +152,10 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           <h2>Opponent</h2>
           <div className="opponent-stats">
             <div className="health">
-              Health: <span className="value">{opponent.health}</span>
+              Score:{' '}
+              <span className="value">
+                {opponent.victoryPoints}/{opponentScoreCap ?? 8}
+              </span>
             </div>
             <div className="hand-size">
               Hand: <span className="value">{opponentHandSize}</span>
@@ -183,9 +187,9 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           {/* Player Stats */}
           <div className="player-stats">
             <div className="health">
-              Health:{' '}
+              Score:{' '}
               <span className="value">
-                {currentPlayer.health}/{playerMaxHealth}
+                {currentPlayer.victoryPoints}/{playerVictoryScore ?? 8}
               </span>
             </div>
             <div className="mana">

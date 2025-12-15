@@ -1,0 +1,137 @@
+{
+  "version": "36.0.0",
+  "artifacts": {
+    "RiftboundUiStack-dev.assets": {
+      "type": "cdk:asset-manifest",
+      "properties": {
+        "file": "RiftboundUiStack-dev.assets.json",
+        "requiresBootstrapStackVersion": 6,
+        "bootstrapStackVersionSsmParameter": "/cdk-bootstrap/hnb659fds/version"
+      }
+    },
+    "RiftboundUiStack-dev": {
+      "type": "aws:cloudformation:stack",
+      "environment": "aws://778198285154/us-east-1",
+      "properties": {
+        "templateFile": "RiftboundUiStack-dev.template.json",
+        "terminationProtection": false,
+        "validateOnSynth": false,
+        "assumeRoleArn": "arn:${AWS::Partition}:iam::778198285154:role/cdk-hnb659fds-deploy-role-778198285154-us-east-1",
+        "cloudFormationExecutionRoleArn": "arn:${AWS::Partition}:iam::778198285154:role/cdk-hnb659fds-cfn-exec-role-778198285154-us-east-1",
+        "stackTemplateAssetObjectUrl": "s3://cdk-hnb659fds-assets-778198285154-us-east-1/979bf8558a117f5836496d49d14cf60b1a40ef13ecf8f81bd54b9e4d0596050d.json",
+        "requiresBootstrapStackVersion": 6,
+        "bootstrapStackVersionSsmParameter": "/cdk-bootstrap/hnb659fds/version",
+        "additionalDependencies": [
+          "RiftboundUiStack-dev.assets"
+        ],
+        "lookupRole": {
+          "arn": "arn:${AWS::Partition}:iam::778198285154:role/cdk-hnb659fds-lookup-role-778198285154-us-east-1",
+          "requiresBootstrapStackVersion": 8,
+          "bootstrapStackVersionSsmParameter": "/cdk-bootstrap/hnb659fds/version"
+        }
+      },
+      "dependencies": [
+        "RiftboundUiStack-dev.assets"
+      ],
+      "metadata": {
+        "/RiftboundUiStack-dev/SiteBucket/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "SiteBucket397A1860"
+          }
+        ],
+        "/RiftboundUiStack-dev/SiteBucket/Policy/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "SiteBucketPolicy3AC1D0F8"
+          }
+        ],
+        "/RiftboundUiStack-dev/SiteBucket/AutoDeleteObjectsCustomResource/Default": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "SiteBucketAutoDeleteObjectsCustomResource9585E968"
+          }
+        ],
+        "/RiftboundUiStack-dev/Custom::S3AutoDeleteObjectsCustomResourceProvider/Role": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "CustomS3AutoDeleteObjectsCustomResourceProviderRole3B1BD092"
+          }
+        ],
+        "/RiftboundUiStack-dev/Custom::S3AutoDeleteObjectsCustomResourceProvider/Handler": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "CustomS3AutoDeleteObjectsCustomResourceProviderHandler9D90184F"
+          }
+        ],
+        "/RiftboundUiStack-dev/SiteOAI/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "SiteOAI1F7E9870"
+          }
+        ],
+        "/RiftboundUiStack-dev/UiCachePolicy/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "UiCachePolicyE74B6825"
+          }
+        ],
+        "/RiftboundUiStack-dev/UiResponseHeaders/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "UiResponseHeaders3A7BA114"
+          }
+        ],
+        "/RiftboundUiStack-dev/SiteDistribution/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "SiteDistribution3FF9535D"
+          }
+        ],
+        "/RiftboundUiStack-dev/SiteBucketName": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "SiteBucketName"
+          }
+        ],
+        "/RiftboundUiStack-dev/DistributionId": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "DistributionId"
+          }
+        ],
+        "/RiftboundUiStack-dev/DistributionDomainName": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "DistributionDomainName"
+          }
+        ],
+        "/RiftboundUiStack-dev/CDKMetadata/Default": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "CDKMetadata"
+          }
+        ],
+        "/RiftboundUiStack-dev/BootstrapVersion": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "BootstrapVersion"
+          }
+        ],
+        "/RiftboundUiStack-dev/CheckBootstrapVersion": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "CheckBootstrapVersion"
+          }
+        ]
+      },
+      "displayName": "RiftboundUiStack-dev"
+    },
+    "Tree": {
+      "type": "cdk:tree",
+      "properties": {
+        "file": "tree.json"
+      }
+    }
+  }
+}

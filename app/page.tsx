@@ -27,6 +27,15 @@ export default function Home() {
                 <Link href="/sign-in" className="cta">
                   Get started — Sign in
                 </Link>
+                <Link href="/deckbuilder" className="btn secondary">
+                  Open Deckbuilder
+                </Link>
+                <Link href="/matchmaking" className="btn secondary">
+                  Queue for a Match
+                </Link>
+                <Link href="/spectate" className="btn secondary">
+                  Watch Matches
+                </Link>
               </p>
             </div>
             <div className="hero-art">

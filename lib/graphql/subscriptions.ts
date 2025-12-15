@@ -1,78 +1,58 @@
 import { gql } from '@apollo/client';
+import {
+  CARD_STATE_FIELDS,
+  PLAYER_BOARD_FIELDS,
+  PLAYER_STATE_FIELDS,
+} from '@/lib/graphql/fragments';
 
 // ============================================================================
 // MATCH SUBSCRIPTIONS
 // ============================================================================
 
 export const GAME_STATE_CHANGED = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
   subscription GameStateChanged($matchId: ID!) {
     gameStateChanged(matchId: $matchId) {
       matchId
+      winner
+      endReason
       players {
-        playerId
-        health
-        maxHealth
-        mana
-        maxMana
-        hand {
-          cardId
-          name
-          cost
-        }
-        board {
-          cardId
-          name
-          power
-          toughness
-        }
+        ...PlayerStateFields
       }
       currentPhase
       turnNumber
       currentPlayerIndex
       status
       timestamp
+      scoreLog {
+        playerId
+        amount
+        reason
+        sourceCardId
+        timestamp
+      }
     }
   }
 `;
 
 export const PLAYER_GAME_STATE_CHANGED = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
+  ${PLAYER_BOARD_FIELDS}
   subscription PlayerGameStateChanged($matchId: ID!, $playerId: ID!) {
     playerGameStateChanged(matchId: $matchId, playerId: $playerId) {
       matchId
       currentPlayer {
-        playerId
-        health
-        maxHealth
-        mana
-        maxMana
-        hand {
-          cardId
-          name
-          cost
-          power
-          toughness
-          type
-        }
-        board {
-          cardId
-          name
-          cost
-          power
-          toughness
-          type
-        }
+        ...PlayerStateFields
       }
       opponent {
         playerId
-        health
+        victoryPoints
+        victoryScore
         handSize
         board {
-          cardId
-          name
-          cost
-          power
-          toughness
-          type
+          ...PlayerBoardStateFields
         }
       }
       gameState {
