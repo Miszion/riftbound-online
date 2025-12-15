@@ -1,0 +1,128 @@
+/* Riftbound Card Styles */
+
+.riftbound-card {
+  position: relative;
+  width: 160px;
+  height: 220px;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.05),
+    rgba(255, 255, 255, 0.01)
+  );
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.riftbound-card:hover {
+  transform: translateY(-8px) scale(1.05);
+  box-shadow: 0 12px 32px rgba(109, 211, 255, 0.2);
+}
+
+.card-image-container {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  background: linear-gradient(
+    180deg,
+    rgba(109, 211, 255, 0.1),
+    rgba(155, 124, 255, 0.05)
+  );
+}
+
+.card-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.card-footer {
+  padding: 0.75rem;
+  height: 60px;
+  background: linear-gradient(
+    180deg,
+    rgba(15, 23, 36, 0.8),
+    rgba(7, 16, 33, 0.95)
+  );
+  border-top: 1px solid rgba(109, 211, 255, 0.1);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.card-footer h4 {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.2;
+  color: #e6eef6;
+}
+
+.card-stats {
+  display: flex;
+  gap: 0.5rem;
+  font-weight: 700;
+  font-size: 0.75rem;
+}
+
+.stat {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 3px;
+  color: #fff;
+}
+
+.stat.power {
+  background: linear-gradient(135deg, #ff6b6b, #ff5252);
+}
+
+.stat.health {
+  background: linear-gradient(135deg, #51cf66, #37b24d);
+}
+
+/* Card type variations */
+.card-champion {
+  border-color: rgba(255, 215, 0, 0.2);
+}
+
+.card-champion::before {
+  content: '★';
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  color: #ffd700;
+  font-size: 1rem;
+  z-index: 2;
+}
+
+.card-spell {
+  border-color: rgba(155, 124, 255, 0.2);
+}
+
+.card-spell::before {
+  content: '✦';
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  color: #9b7cff;
+  font-size: 0.9rem;
+  z-index: 2;
+}
+
+.card-rune {
+  border-color: rgba(109, 211, 255, 0.2);
+}
+
+.card-rune::before {
+  content: '◆';
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  color: #6dd3ff;
+  font-size: 0.8rem;
+  z-index: 2;
+}

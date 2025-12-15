@@ -1,0 +1,8 @@
+# See https://nextjs.org/docs/basic-features/built-in-css-support#disabling-css-modules
+node_modules
+.next
+dist
+out
+build
+*.tsbuildinfo
+.env.local
