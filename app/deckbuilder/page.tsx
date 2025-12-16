@@ -123,6 +123,7 @@ const MAX_RUNE_COPIES = 12
 const RUNE_SLOT_COUNT = 2
 const BATTLEFIELD_SLOTS = 3
 const SIDE_DECK_MAX = 8
+type SideDeckResult = 'added' | 'full' | 'maxCopies' | 'invalid'
 
 const domainFilters = ['all', 'fury', 'calm', 'mind', 'body', 'chaos', 'order']
 const typeFilters = ['all', 'creature', 'spell', 'artifact', 'enchantment']
@@ -155,6 +156,7 @@ function DeckbuilderView() {
   const [battlefields, setBattlefields] = useState<(CatalogCard | null)[]>(() => Array(BATTLEFIELD_SLOTS).fill(null))
   const [runeDeck, setRuneDeck] = useState<Record<string, DeckEntry>>({})
   const [sideDeckEntries, setSideDeckEntries] = useState<Record<string, DeckEntry>>({})
+  const [pendingDeleteDeck, setPendingDeleteDeck] = useState<SavedDeck | null>(null)
   const [toasts, setToasts] = useState<ToastMessage[]>([])
   const catalogLimit = Number.isFinite(MAX_RESULTS) ? (MAX_RESULTS as number) : undefined
 
@@ -712,14 +714,14 @@ function DeckbuilderView() {
     return true
   }
 
-  const addSideDeckCard = (card: CatalogCard): boolean => {
+  const addSideDeckCard = (card: CatalogCard): SideDeckResult => {
     if (isBattlefieldCard(card)) {
       pushToast('Battlefields belong in their dedicated zone, not the side deck.', 'warning')
-      return false
+      return 'invalid'
     }
     if (isRuneCard(card)) {
       pushToast('Runes are stored in the rune deck.', 'warning')
-      return false
+      return 'invalid'
     }
 
     let updated = false
@@ -748,15 +750,15 @@ function DeckbuilderView() {
 
     if (blocked) {
       pushToast('Side decks can only hold up to 8 cards total.', 'warning')
-      return false
+      return 'full'
     }
 
     if (!updated) {
-      return false
+      return 'maxCopies'
     }
 
     // no toast on success
-    return true
+    return 'added'
   }
 
 const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'main') => {
@@ -800,9 +802,13 @@ const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'ma
           return
         }
       }
-      const added = addSideDeckCard(card)
-      if (added) {
+      const result = addSideDeckCard(card)
+      if (result === 'added') {
         setFocusedCard(card)
+      } else if (result === 'full') {
+        pushToast('Side deck is full.', 'warning')
+      } else if (result === 'maxCopies') {
+        pushToast('You already hold the maximum copies of this card.', 'warning')
       }
       return
     }
@@ -868,18 +874,14 @@ const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'ma
     }
     const adjustedTotal = totalCards - existingQuantity + nextQuantity
     if (adjustedTotal > MAX_DECK_CARDS) {
-      const sideAdded = addSideDeckCard(card)
-      if (sideAdded) {
+      const sideResult = addSideDeckCard(card)
+      if (sideResult === 'added') {
         setFocusedCard(card)
         pushToast('Main deck is full. Added card to the side deck.', 'info')
-      } else {
-        const sideFull = totalSideDeckCards >= SIDE_DECK_MAX
-        pushToast(
-          sideFull
-            ? 'Side deck is full.'
-            : 'Cannot add more copies of this card to the side deck.',
-          'warning'
-        )
+      } else if (sideResult === 'full') {
+        pushToast('Side deck is full.', 'warning')
+      } else if (sideResult === 'maxCopies') {
+        pushToast('Cannot add more copies of this card to the side deck.', 'warning')
       }
       return
     }
@@ -1117,13 +1119,16 @@ const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'ma
   }
 
   const handleSaveDeck = async () => {
-    if (!deckName.trim()) {
+    const trimmedName = deckName.trim()
+    if (!trimmedName) {
       pushToast('Provide a deck name before saving.', 'error')
       return
     }
 
-    const normalizedName = deckName.trim().toLowerCase()
-    if (!activeDeckId) {
+    const normalizedName = trimmedName.toLowerCase()
+    const isExistingDeck = Boolean(activeDeckId && currentDeckRecord)
+    const isRenaming = isExistingDeck && normalizedName !== originalDeckName.toLowerCase()
+    if (!isExistingDeck || isRenaming) {
       const duplicate = savedDecks.some((deck) => deck.name.trim().toLowerCase() === normalizedName)
       if (duplicate) {
         pushToast('A deck with this name already exists. Choose a different name.', 'error')
@@ -1162,9 +1167,9 @@ const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'ma
     }
 
     const payload = {
-      deckId: activeDeckId ?? undefined,
+      deckId: isExistingDeck && !isRenaming ? activeDeckId ?? undefined : undefined,
       userId: userId.trim(),
-      name: deckName.trim(),
+      name: trimmedName,
       cards: deckCards.map((entry) => ({
         cardId: entry.card.id,
         slug: entry.card.slug,
@@ -1232,11 +1237,12 @@ const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'ma
     }
   }
 
-  const handleDeleteDeck = async (deck: SavedDeck) => {
-    const confirmed = window.confirm(`Delete deck "${deck.name}"?`)
-    if (!confirmed) {
+  const handleConfirmDelete = async () => {
+    if (!pendingDeleteDeck) {
       return
     }
+    const deck = pendingDeleteDeck
+    setPendingDeleteDeck(null)
 
     try {
       pushToast('Deleting deck...', 'info')
@@ -1268,6 +1274,20 @@ const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'ma
     }
   }
 
+  const currentDeckRecord = activeDeckId
+    ? savedDecks.find((deck) => deck.deckId === activeDeckId)
+    : null
+  const originalDeckName = currentDeckRecord?.name?.trim() ?? ''
+  const deckNameChanged =
+    Boolean(currentDeckRecord) && deckName.trim() && deckName.trim() !== originalDeckName
+  const saveButtonLabel = savingDeck
+    ? 'Saving…'
+    : deckNameChanged
+      ? 'Create deck'
+      : activeDeckId
+        ? 'Update deck'
+        : 'Save deck'
+
   return (
     <>
       <Header />
@@ -1293,7 +1313,7 @@ const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'ma
             />
           </label>
           <button className="cta" disabled={!canSaveDeck || savingDeck} onClick={handleSaveDeck}>
-            {savingDeck ? 'Saving…' : activeDeckId ? 'Update deck' : 'Save deck'}
+            {saveButtonLabel}
           </button>
           <label className="deck-control-item">
             <span>Saved decks</span>
@@ -1312,6 +1332,13 @@ const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'ma
           </label>
           <button className="btn-link deck-control-new" onClick={handleResetDeck}>
             New deck
+          </button>
+          <button
+            className="btn-link deck-control-delete"
+            onClick={() => currentDeckRecord && setPendingDeleteDeck(currentDeckRecord)}
+            disabled={!currentDeckRecord}
+          >
+            Delete deck
           </button>
         </div>
         <section className="deckbuilder-shell">
@@ -1730,6 +1757,25 @@ const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'ma
           </aside>
         </section>
       </main>
+      {pendingDeleteDeck && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true">
+          <div className="modal-card">
+            <h3>Delete deck?</h3>
+            <p>
+              Are you sure you want to delete <strong>{pendingDeleteDeck.name}</strong>? This action
+              cannot be undone.
+            </p>
+            <div className="modal-actions">
+              <button className="btn secondary" onClick={() => setPendingDeleteDeck(null)}>
+                Cancel
+              </button>
+              <button className="btn danger" onClick={handleConfirmDelete}>
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <Footer />
     </>
   )
