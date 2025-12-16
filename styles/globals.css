@@ -440,18 +440,14 @@ button.primary {
   cursor: not-allowed;
 }
 
-.deck-default-toggle {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 0.4rem;
-  margin-bottom: 0.35rem;
+.deck-default-btn {
+  align-self: flex-end;
+  min-width: 130px;
 }
 
-.deck-default-toggle input {
-  width: 1.2rem;
-  height: 1.2rem;
+.deck-default-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .deck-control-item {

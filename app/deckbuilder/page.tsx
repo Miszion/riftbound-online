@@ -67,6 +67,10 @@ type SavedDeck = {
   userId: string
   name: string
   description?: string | null
+  heroSlug?: string | null
+  format?: string | null
+  tags?: string[] | null
+  isPublic?: boolean | null
   isDefault?: boolean | null
   cards: DeckCardDTO[]
   runeDeck?: DeckCardDTO[]
@@ -157,7 +161,6 @@ function DeckbuilderView() {
   const [battlefields, setBattlefields] = useState<(CatalogCard | null)[]>(() => Array(BATTLEFIELD_SLOTS).fill(null))
   const [runeDeck, setRuneDeck] = useState<Record<string, DeckEntry>>({})
   const [sideDeckEntries, setSideDeckEntries] = useState<Record<string, DeckEntry>>({})
-  const [isDefaultDeck, setIsDefaultDeck] = useState(false)
   const [didAutoLoadDefault, setDidAutoLoadDefault] = useState(false)
   const [pendingDeleteDeck, setPendingDeleteDeck] = useState<SavedDeck | null>(null)
   const [toasts, setToasts] = useState<ToastMessage[]>([])
@@ -548,16 +551,6 @@ function DeckbuilderView() {
       cancelled = true
     }
   }, [pendingDeck, cards.length, restoreDeckFromSaved, hydrateDeckSnapshots])
-
-  useEffect(() => {
-    if (!activeDeckId) {
-      return
-    }
-    const matched = savedDecks.find((deck) => deck.deckId === activeDeckId)
-    if (matched) {
-      setIsDefaultDeck(Boolean(matched.isDefault))
-    }
-  }, [savedDecks, activeDeckId])
 
 
   const isRuneCard = (card: CatalogCard) => {
@@ -1117,7 +1110,6 @@ const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'ma
     setLeaderCard(null)
     setLegendCard(null)
     setBattlefields(Array(BATTLEFIELD_SLOTS).fill(null))
-    setIsDefaultDeck(false)
   }
 
   const handleLoadDeck = useCallback(
@@ -1131,7 +1123,6 @@ const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'ma
         }
         setDeckName(hydratedDeck.name)
         setActiveDeckId(hydratedDeck.deckId)
-        setIsDefaultDeck(Boolean(hydratedDeck.isDefault))
         pushToast(`Loaded ${hydratedDeck.name}`, 'success')
       } catch (error) {
         console.error('Failed to hydrate deck snapshots', error)
@@ -1204,7 +1195,7 @@ const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'ma
       deckId: isExistingDeck && !isRenaming ? activeDeckId ?? undefined : undefined,
       userId: userId.trim(),
       name: trimmedName,
-      isDefault: isDefaultDeck,
+      isDefault: currentDeckRecord?.isDefault ?? false,
       cards: deckCards.map((entry) => ({
         cardId: entry.card.id,
         slug: entry.card.slug,
@@ -1258,7 +1249,6 @@ const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'ma
       const persistedDeck = result.data?.saveDecklist as SavedDeck | undefined
       if (persistedDeck?.deckId) {
         setActiveDeckId(persistedDeck.deckId)
-        setIsDefaultDeck(Boolean(persistedDeck.isDefault))
         setSavedDecks((prev) => {
           const next = prev.some((deck) => deck.deckId === persistedDeck.deckId)
             ? prev.map((deck) => (deck.deckId === persistedDeck.deckId ? persistedDeck : deck))
@@ -1310,9 +1300,79 @@ const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'ma
     }
   }
 
+  const handleSetDefaultDeck = async () => {
+    const deck = currentDeckRecord
+    if (!deck) {
+      pushToast('Select a deck before setting a default.', 'warning')
+      return
+    }
+    const stripEntry = (entry?: DeckCardDTO | null) => {
+      if (!entry) return undefined
+      const clone: any = { ...entry }
+      delete clone.__typename
+      if (clone.cardSnapshot) {
+        clone.cardSnapshot = { ...clone.cardSnapshot }
+        delete clone.cardSnapshot.__typename
+        if (clone.cardSnapshot.assets) {
+          clone.cardSnapshot.assets = { ...clone.cardSnapshot.assets }
+          delete clone.cardSnapshot.assets.__typename
+        }
+      }
+      return clone
+    }
+
+    const stripEntries = (entries?: DeckCardDTO[] | null) =>
+      entries?.map((entry) => stripEntry(entry) ?? entry) ?? []
+
+    try {
+      pushToast('Updating default deck...', 'info')
+      const result = await saveDecklist({
+        variables: {
+          input: {
+            deckId: deck.deckId,
+            userId: deck.userId,
+            name: deck.name,
+            description: deck.description ?? '',
+            heroSlug: deck.heroSlug ?? null,
+            format: deck.format ?? 'standard',
+            tags: deck.tags ?? [],
+            isPublic: Boolean(deck.isPublic),
+            isDefault: true,
+            cards: stripEntries(deck.cards),
+            runeDeck: stripEntries(deck.runeDeck),
+            battlefields: stripEntries(deck.battlefields),
+            sideDeck: stripEntries(deck.sideDeck),
+            championLegend: stripEntry(deck.championLegend),
+            championLeader: stripEntry(deck.championLeader),
+          },
+        },
+      })
+      const persistedDeck = result.data?.saveDecklist as SavedDeck | undefined
+      if (persistedDeck) {
+        setSavedDecks((prev) =>
+          prev
+            .map((entry) =>
+              entry.deckId === persistedDeck.deckId
+                ? persistedDeck
+                : { ...entry, isDefault: false }
+            )
+            .sort((a, b) => a.name.localeCompare(b.name))
+        )
+        if (!activeDeckId) {
+          setActiveDeckId(persistedDeck.deckId)
+        }
+        await refetchDecklists?.()
+        pushToast(`${persistedDeck.name} set as default.`, 'success')
+      }
+    } catch (error: any) {
+      pushToast(error.message || 'Failed to update default deck.', 'error')
+    }
+  }
+
   const currentDeckRecord = activeDeckId
     ? savedDecks.find((deck) => deck.deckId === activeDeckId)
     : null
+  const isCurrentDefault = Boolean(currentDeckRecord?.isDefault)
   const originalDeckName = currentDeckRecord?.name?.trim() ?? ''
   const deckNameChanged =
     Boolean(currentDeckRecord) && deckName.trim() && deckName.trim() !== originalDeckName
@@ -1351,14 +1411,13 @@ const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'ma
           <button className="cta" disabled={!canSaveDeck || savingDeck} onClick={handleSaveDeck}>
             {saveButtonLabel}
           </button>
-          <label className="deck-default-toggle">
-            <span>Set as default</span>
-            <input
-              type="checkbox"
-              checked={isDefaultDeck}
-              onChange={(event) => setIsDefaultDeck(event.target.checked)}
-            />
-          </label>
+          <button
+            className="btn secondary deck-default-btn"
+            disabled={!currentDeckRecord || isCurrentDefault}
+            onClick={handleSetDefaultDeck}
+          >
+            {isCurrentDefault ? 'Default deck' : 'Set as default'}
+          </button>
           <label className="deck-control-item">
             <span>Saved decks</span>
             <select
