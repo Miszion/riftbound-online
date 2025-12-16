@@ -396,6 +396,7 @@ export const GET_DECKLISTS = gql`
       format
       tags
       isPublic
+      isDefault
       cardCount
       cards {
         cardId
@@ -528,6 +529,7 @@ export const SAVE_DECKLIST = gql`
       format
       tags
       isPublic
+      isDefault
       cardCount
       cards {
         cardId
