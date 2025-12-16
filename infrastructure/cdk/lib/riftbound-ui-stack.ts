@@ -95,7 +95,21 @@ export class RiftboundUiStack extends Stack {
       },
       defaultRootObject: 'index.html',
       comment: `Riftbound UI ${stage}`,
-      minimumProtocolVersion: SecurityPolicyProtocol.TLS_V1_2_2021
+      minimumProtocolVersion: SecurityPolicyProtocol.TLS_V1_2_2021,
+      errorResponses: [
+        {
+          httpStatus: 404,
+          responseHttpStatus: 200,
+          responsePagePath: '/index.html',
+          ttl: Duration.seconds(0)
+        },
+        {
+          httpStatus: 403,
+          responseHttpStatus: 200,
+          responsePagePath: '/index.html',
+          ttl: Duration.seconds(0)
+        }
+      ]
     });
 
     new CfnOutput(this, 'SiteBucketName', {

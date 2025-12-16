@@ -459,6 +459,7 @@ label {
   margin-top: 0.75rem;
   color: var(--muted);
   font-size: 0.9rem;
+  font-weight: 600;
 }
 
 input {
@@ -918,6 +919,7 @@ button.primary {
   padding: 0.1rem 0.45rem;
   border-radius: 999px;
   background: rgba(0, 0, 0, 0.55);
+  font-weight: 600;
 }
 
 .champion-card-shell {
@@ -1006,6 +1008,14 @@ button.primary {
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(0, 0, 0, 0.4);
+  box-shadow: 0 15px 30px rgba(0, 0, 0, 0.25);
+  transform: translateZ(0);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.deck-card:hover {
+  transform: translateY(-6px);
+  box-shadow: 0 25px 45px rgba(0, 0, 0, 0.45);
 }
 
 .deck-card.empty-slot {
@@ -1229,6 +1239,7 @@ button.primary {
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
+  font-weight: 600;
 }
 
 .search-form input,
