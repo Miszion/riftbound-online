@@ -1,8 +1,12 @@
 import { gql } from '@apollo/client';
 import {
   CARD_STATE_FIELDS,
+  CARD_SNAPSHOT_FIELDS,
   PLAYER_BOARD_FIELDS,
   PLAYER_STATE_FIELDS,
+  BATTLEFIELD_STATE_FIELDS,
+  GAME_PROMPT_FIELDS,
+  PRIORITY_WINDOW_FIELDS,
 } from '@/lib/graphql/fragments';
 
 // ============================================================================
@@ -12,6 +16,10 @@ import {
 export const GAME_STATE_CHANGED = gql`
   ${CARD_STATE_FIELDS}
   ${PLAYER_STATE_FIELDS}
+  ${CARD_SNAPSHOT_FIELDS}
+  ${BATTLEFIELD_STATE_FIELDS}
+  ${GAME_PROMPT_FIELDS}
+  ${PRIORITY_WINDOW_FIELDS}
   subscription GameStateChanged($matchId: ID!) {
     gameStateChanged(matchId: $matchId) {
       matchId
@@ -31,6 +39,15 @@ export const GAME_STATE_CHANGED = gql`
         reason
         sourceCardId
         timestamp
+      }
+      prompts {
+        ...GamePromptFields
+      }
+      priorityWindow {
+        ...PriorityWindowFields
+      }
+      battlefields {
+        ...BattlefieldStateFields
       }
     }
   }
@@ -119,7 +136,7 @@ export const ATTACK_DECLARED = gql`
       matchId
       playerId
       creatureInstanceId
-      defenderId
+      destinationId
       timestamp
     }
   }

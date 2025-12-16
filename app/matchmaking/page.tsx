@@ -1,28 +1,43 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Header from '@/components/Header'
 import Footer from '@/components/Footer'
 import RequireAuth from '@/components/auth/RequireAuth'
+import GameBoard from '@/components/GameBoard'
+import LoadingSpinner from '@/components/ui/LoadingSpinner'
 import {
   useJoinMatchmakingQueue,
   useLeaveMatchmakingQueue,
   useMatchmakingStatus,
+  useDecklists,
 } from '@/hooks/useGraphQL'
 import { useAuth } from '@/hooks/useAuth'
+import useToasts from '@/hooks/useToasts'
+
+type DeckSummary = {
+  deckId: string
+  name: string
+  description?: string | null
+  format?: string | null
+  isDefault?: boolean | null
+  cardCount?: number | null
+}
 
 type MatchMode = 'ranked' | 'free'
 
 const MODES: { value: MatchMode; label: string; description: string }[] = [
   {
-    value: 'ranked',
-    label: 'Ranked Play',
-    description: 'Matchmaking Rating (MMR) based pairing with tighter tolerance.',
+    value: 'free',
+    label: 'Quick Play',
+    description:
+      'Fast casual queue that pairs the first two players waiting. Perfect for testing matches end-to-end.',
   },
   {
-    value: 'free',
-    label: 'Free Play',
-    description: 'Fast casual games with flexible matching.',
+    value: 'ranked',
+    label: 'Ranked Play',
+    description:
+      'MMR-based matchmaking with tighter tolerance windows. Ideal once balance tuning begins.',
   },
 ]
 
@@ -37,13 +52,38 @@ export default function MatchmakingPage() {
 function MatchmakingContent() {
   const { user } = useAuth()
   const userId = user?.userId ?? ''
-  const [deckId, setDeckId] = useState('')
-  const [mode, setMode] = useState<MatchMode>('ranked')
-  const [message, setMessage] = useState<string | null>(null)
+  const [selectedDeckId, setSelectedDeckId] = useState('')
+  const [mode, setMode] = useState<MatchMode>('free')
+  const [activeMatchId, setActiveMatchId] = useState<string | null>(null)
+  const [activePlayerId, setActivePlayerId] = useState<string | null>(null)
+  const [pendingMatchId, setPendingMatchId] = useState<string | null>(null)
+  const [matchCountdown, setMatchCountdown] = useState<number | null>(null)
+  const { pushToast } = useToasts()
+  const lastAnnouncedMatchId = useRef<string | null>(null)
+  const {
+    data: deckData,
+    loading: decksLoading,
+    error: deckError,
+  } = useDecklists(userId || null)
+  const decklists = (deckData?.decklists ?? []) as DeckSummary[]
+  const selectedDeck = decklists.find((deck) => deck.deckId === selectedDeckId)
+  useEffect(() => {
+    if (!decklists.length) {
+      setSelectedDeckId('')
+      return
+    }
+    setSelectedDeckId((previous) => {
+      if (previous && decklists.some((deck) => deck.deckId === previous)) {
+        return previous
+      }
+      const defaultDeck = decklists.find((deck) => deck.isDefault)
+      return defaultDeck?.deckId ?? decklists[0].deckId
+    })
+  }, [decklists])
   const pollInterval = userId ? 4000 : undefined
   const {
     data: statusData,
-    loading: statusLoading,
+    error: statusError,
     refetch: refetchStatus,
   } = useMatchmakingStatus(userId || null, mode, pollInterval)
   const status = statusData?.matchmakingStatus
@@ -51,60 +91,135 @@ function MatchmakingContent() {
   const [joinQueue, { loading: joining }] = useJoinMatchmakingQueue()
   const [leaveQueue, { loading: leaving }] = useLeaveMatchmakingQueue()
 
-  const actionDisabled = !userId || joining || leaving
+  const actionDisabled = !userId || joining || leaving || !selectedDeckId
+  const selectedMode = useMemo(
+    () => MODES.find((entry) => entry.value === mode),
+    [mode],
+  )
+
+  useEffect(() => {
+    if (deckError) {
+      pushToast(deckError.message ?? 'Failed to load decklists.', 'error')
+    }
+  }, [deckError, pushToast])
+
+  useEffect(() => {
+    if (statusError) {
+      pushToast(statusError.message ?? 'Failed to refresh matchmaking status.', 'error')
+    }
+  }, [statusError, pushToast])
 
   const statusSummary = useMemo(() => {
     if (!status) {
       return 'Signed in users can join ranked or free queues.'
     }
     if (status.matchId && !status.queued) {
-      return `Match found! Opponent: ${status.opponentId ?? 'pending'}`
+      return `Match found! Opponent: ${status.opponentName ?? 'pending'}`
     }
     if (status.queued) {
-      return `Queued (${mode}). Estimated wait: ${
+      return `Queued (${selectedMode?.label ?? mode}). Estimated wait: ${
         status.estimatedWaitSeconds ?? '?'
       }s`
     }
     return 'Not in queue.'
-  }, [status, mode])
+  }, [status, mode, selectedMode])
+
+  const showQueueMessage = Boolean(status?.queued)
+
+  useEffect(() => {
+    if (status?.matchId && !status.queued && userId) {
+      const alreadyRunning =
+        status.matchId === activeMatchId || status.matchId === pendingMatchId
+      if (!alreadyRunning) {
+        lastAnnouncedMatchId.current = status.matchId
+        setPendingMatchId(status.matchId)
+        setMatchCountdown(5)
+        const opponentLabel = status.opponentName ?? 'your opponent'
+        pushToast(`Match found vs ${opponentLabel}. Starting in 5 seconds…`, 'success')
+      }
+    } else {
+      if (!status?.matchId) {
+        lastAnnouncedMatchId.current = null
+      }
+      setPendingMatchId(null)
+      setMatchCountdown(null)
+    }
+  }, [
+    status?.matchId,
+    status?.queued,
+    status?.opponentName,
+    userId,
+    activeMatchId,
+    pendingMatchId,
+    pushToast,
+  ])
+
+  useEffect(() => {
+    if (!userId) {
+      setActiveMatchId(null)
+      setActivePlayerId(null)
+      setPendingMatchId(null)
+      setMatchCountdown(null)
+      return
+    }
+    if (matchCountdown === null) {
+      return
+    }
+    if (matchCountdown <= 0) {
+      if (pendingMatchId) {
+        setActiveMatchId(pendingMatchId)
+        setActivePlayerId(userId)
+      }
+      setPendingMatchId(null)
+      setMatchCountdown(null)
+      return
+    }
+    const timer = setTimeout(() => {
+      setMatchCountdown((prev) => (prev !== null ? prev - 1 : null))
+    }, 1000)
+    return () => clearTimeout(timer)
+  }, [matchCountdown, pendingMatchId, userId])
 
   const handleJoin = async () => {
     if (!userId) {
-      setMessage('Sign in before queueing.')
+      pushToast('Sign in before queueing.', 'warning')
       return
     }
-    setMessage('Joining queue…')
+    if (!selectedDeckId) {
+      pushToast('Select a deck before joining the queue.', 'warning')
+      return
+    }
     try {
       const result = await joinQueue({
         variables: {
           input: {
             userId,
             mode,
-            deckId: deckId || undefined,
+            deckId: selectedDeckId,
           },
         },
       })
       const payload = result.data?.joinMatchmakingQueue
       if (payload?.matchFound) {
-        setMessage(
-          `Matched immediately! Match ID: ${payload.matchId ?? 'pending'}`,
-        )
+        pushToast(`Matched immediately! Preparing to launch…`, 'success')
       } else {
-        setMessage(
-          `Queued for ${mode}. Est. wait ~${payload?.estimatedWaitSeconds ?? '?'}s`,
+        pushToast(
+          `Joined ${selectedMode?.label ?? mode} queue. Est. wait ~${payload?.estimatedWaitSeconds ?? '?'}s`,
+          'success'
         )
       }
       await refetchStatus()
-    } catch (error: any) {
-      setMessage(error.message || 'Failed to join queue')
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to join queue'
+      pushToast(message, 'error')
     }
   }
 
   const handleLeave = async () => {
     if (!userId) {
+      pushToast('You must be signed in to leave the queue.', 'warning')
       return
     }
-    setMessage('Leaving queue…')
     try {
       await leaveQueue({
         variables: {
@@ -113,9 +228,10 @@ function MatchmakingContent() {
         },
       })
       await refetchStatus()
-      setMessage('Removed from matchmaking queue.')
-    } catch (error: any) {
-      setMessage(error.message || 'Failed to leave queue')
+      pushToast('Removed from matchmaking queue.', 'warning')
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to leave queue'
+      pushToast(message, 'error')
     }
   }
 
@@ -127,12 +243,10 @@ function MatchmakingContent() {
           <div>
             <h2>Matchmaking Queue</h2>
             <p className="muted">
-              Hop into free play or ranked mode. Ranked matches pair you with
-              similar MMR players; free play prioritizes speed.
+              Quick Play instantly pairs the first two players waiting so you
+              can validate gameplay flows with real accounts. Ranked Play uses
+              MMR windows and will be our focus once competitive tuning starts.
             </p>
-          </div>
-          <div className="status-message" aria-live="polite">
-            {message}
           </div>
         </div>
 
@@ -140,19 +254,41 @@ function MatchmakingContent() {
           <div className="form-field">
             <label>Signed in as</label>
             <div className="user-context">
-              <strong>{user?.email ?? userId}</strong>
-              <span className="muted small">{userId}</span>
+              <strong>{user?.username ?? user?.email ?? 'Unknown Summoner'}</strong>
             </div>
           </div>
-          <label>
-            Active Deck ID <span className="muted small">(optional)</span>
-            <input
-              type="text"
-              placeholder="deck-abc"
-              value={deckId}
-              onChange={(event) => setDeckId(event.target.value)}
-            />
-          </label>
+          <div className="form-field">
+            <label>Deck to queue</label>
+            {decksLoading && (
+              <p className="muted small">Loading decks…</p>
+            )}
+            {!decksLoading && decklists.length === 0 && (
+              <p className="muted small">
+                Save a deck in the deckbuilder to enable matchmaking.
+              </p>
+            )}
+            {decklists.length > 0 && (
+              <>
+                <select
+                  value={selectedDeckId}
+                  onChange={(event) => setSelectedDeckId(event.target.value)}
+                >
+                  {decklists.map((deck) => (
+                    <option key={deck.deckId} value={deck.deckId}>
+                      {deck.name}
+                      {deck.isDefault ? ' (Default)' : ''}
+                    </option>
+                  ))}
+                </select>
+                {selectedDeck && (
+                  <p className="muted small">
+                    {selectedDeck.cardCount ?? 0} cards ·{' '}
+                    {selectedDeck.format ?? 'standard'}
+                  </p>
+                )}
+              </>
+            )}
+          </div>
         </section>
 
         <section className="matchmaking-modes">
@@ -182,7 +318,7 @@ function MatchmakingContent() {
             onClick={handleJoin}
             disabled={actionDisabled}
           >
-            {joining ? 'Joining…' : `Join ${mode === 'ranked' ? 'Ranked' : 'Free'} Queue`}
+            {joining ? 'Joining…' : `Join ${selectedMode?.label ?? 'queue'}`}
           </button>
           <button
             className="btn secondary"
@@ -195,8 +331,7 @@ function MatchmakingContent() {
 
         <section className="matchmaking-status">
           <h3>Status</h3>
-          {statusLoading && <p className="muted small">Loading status…</p>}
-          {!statusLoading && <p>{statusSummary}</p>}
+          <p>{statusSummary}</p>
           {status && (
             <div className="status-grid">
               <div>
@@ -212,12 +347,8 @@ function MatchmakingContent() {
                 <strong>{status.estimatedWaitSeconds ?? '—'} sec</strong>
               </div>
               <div>
-                <span className="muted small">Match ID</span>
-                <strong>{status.matchId ?? '—'}</strong>
-              </div>
-              <div>
                 <span className="muted small">Opponent</span>
-                <strong>{status.opponentId ?? 'Pending'}</strong>
+                <strong>{status.opponentName ?? 'Pending'}</strong>
               </div>
               <div>
                 <span className="muted small">Queued At</span>
@@ -230,6 +361,31 @@ function MatchmakingContent() {
             </div>
           )}
         </section>
+        {matchCountdown !== null && pendingMatchId ? (
+          <div className="queue-waiting" aria-live="polite">
+            <LoadingSpinner size="sm" label="Match starting soon" />
+            <span>Match found! Launching in {matchCountdown}s…</span>
+          </div>
+        ) : (
+          showQueueMessage && (
+            <div className="queue-waiting" aria-live="polite">
+              <LoadingSpinner size="sm" label="Searching for opponent" />
+              <span>Searching for an opponent…</span>
+            </div>
+          )
+        )}
+        {activeMatchId && activePlayerId && (
+          <section className="matchmaking-live-match">
+            <div className="live-match-header">
+              <div>
+                <h3>Live Match</h3>
+              </div>
+            </div>
+            <div className="matchmaking-gameboard">
+              <GameBoard matchId={activeMatchId} playerId={activePlayerId} />
+            </div>
+          </section>
+        )}
       </main>
       <Footer />
     </>

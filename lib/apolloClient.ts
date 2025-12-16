@@ -61,6 +61,10 @@ const activityLink = new ApolloLink((operation, forward) => {
   if (!forward) {
     return null;
   }
+  const { skipNetworkActivity } = operation.getContext?.() ?? {};
+  if (skipNetworkActivity) {
+    return forward(operation);
+  }
   networkActivity.start();
   return new Observable((observer) => {
     const subscription = forward(operation).subscribe({

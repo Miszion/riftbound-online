@@ -10,6 +10,7 @@ import {
   INIT_MATCH,
   PLAY_CARD,
   ATTACK,
+  MOVE_UNIT,
   NEXT_PHASE,
   REPORT_MATCH_RESULT,
   CONCEDE_MATCH,
@@ -22,6 +23,9 @@ import {
   LEAVE_MATCHMAKING_QUEUE,
   GET_MATCH_REPLAY,
   GET_RECENT_MATCHES,
+  SUBMIT_MULLIGAN,
+  SELECT_BATTLEFIELD,
+  SUBMIT_INITIATIVE_CHOICE,
 } from '@/lib/graphql/queries';
 import {
   GAME_STATE_CHANGED,
@@ -94,12 +98,28 @@ export function useInitMatch() {
   return useMutation(INIT_MATCH);
 }
 
+export function useSubmitInitiativeChoice() {
+  return useMutation(SUBMIT_INITIATIVE_CHOICE);
+}
+
+export function useSubmitMulligan() {
+  return useMutation(SUBMIT_MULLIGAN);
+}
+
+export function useSelectBattlefield() {
+  return useMutation(SELECT_BATTLEFIELD);
+}
+
 export function usePlayCard() {
   return useMutation(PLAY_CARD);
 }
 
 export function useAttack() {
   return useMutation(ATTACK);
+}
+
+export function useMoveUnit() {
+  return useMutation(MOVE_UNIT);
 }
 
 export function useNextPhase() {
@@ -149,6 +169,8 @@ export function useMatchmakingStatus(
     variables: { userId: userId || '', mode },
     skip: !userId,
     pollInterval: userId ? pollInterval : undefined,
+    context: { skipNetworkActivity: true },
+    notifyOnNetworkStatusChange: false,
   });
 }
 

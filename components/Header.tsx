@@ -12,8 +12,8 @@ export default function Header() {
 
   const navLinks = user
     ? [
-        { href: '/spectate', label: 'Spectate' },
         { href: '/matchmaking', label: 'Matchmaking' },
+        { href: '/spectate', label: 'Spectate' },
         { href: '/deckbuilder', label: 'Deckbuilder' },
       ]
     : [{ href: '/sign-in', label: 'Sign In' }]
@@ -27,7 +27,7 @@ export default function Header() {
         <div className="brand-group">
           <button
             type="button"
-            className={`nav-toggle${menuOpen ? ' open' : ''}`}
+            className={`nav-toggle modern${menuOpen ? ' open' : ''}`}
             aria-label="Toggle navigation menu"
             aria-expanded={menuOpen}
             onClick={toggleMenu}
@@ -39,9 +39,9 @@ export default function Header() {
           <Link href="/" className="logo-link" aria-label="Return to home">
             <h1 className="logo">Riftbound Online</h1>
           </Link>
-          <nav className={`nav-menu${menuOpen ? ' open' : ''}`}>
+          <nav className="desktop-nav">
             {navLinks.map((link) => (
-              <Link key={link.href} href={link.href} className="nav-menu-link" onClick={closeMenu}>
+              <Link key={link.href} href={link.href}>
                 {link.label}
               </Link>
             ))}
@@ -65,6 +65,41 @@ export default function Header() {
           )}
         </div>
       </div>
+      <aside className={`side-nav${menuOpen ? ' open' : ''}`} aria-hidden={!menuOpen}>
+        <div className="side-nav-header">
+          <div>
+            <p className="muted small">Main Navigation</p>
+            <strong>Welcome, {displayName}</strong>
+          </div>
+          <button
+            type="button"
+            aria-label="Close navigation"
+            className="close-nav"
+            onClick={closeMenu}
+          >
+            ×
+          </button>
+        </div>
+        <nav className="side-nav-links">
+          {navLinks.map((link) => (
+            <Link key={link.href} href={link.href} onClick={closeMenu}>
+              <span>{link.label}</span>
+            </Link>
+          ))}
+        </nav>
+        {user && (
+          <div className="side-nav-footer">
+            <button className="btn secondary block" onClick={() => { logout(); closeMenu(); }}>
+              Sign Out
+            </button>
+          </div>
+        )}
+      </aside>
+      <div
+        className={`side-nav-overlay${menuOpen ? ' open' : ''}`}
+        onClick={closeMenu}
+        aria-hidden="true"
+      />
     </header>
   )
 }

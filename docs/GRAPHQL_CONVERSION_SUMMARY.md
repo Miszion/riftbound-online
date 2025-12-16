@@ -135,7 +135,14 @@ playCard({ variables: { matchId, playerId, cardIndex } });
 
 // Attack
 const [attack] = useAttack();
-attack({ variables: { matchId, playerId, creatureInstanceId } });
+attack({
+  variables: {
+    matchId,
+    playerId,
+    creatureInstanceId,
+    destinationId: battlefieldId,
+  },
+});
 
 // Phase advancement
 const [nextPhase] = useNextPhase();

@@ -22,6 +22,10 @@ export const CARD_STATE_FIELDS = gql`
       remote
       localPath
     }
+    location {
+      zone
+      battlefieldId
+    }
     activationState {
       cardId
       isStateful
@@ -32,6 +36,23 @@ export const CARD_STATE_FIELDS = gql`
         reason
         active
       }
+    }
+  }
+`
+
+export const CARD_SNAPSHOT_FIELDS = gql`
+  fragment CardSnapshotFields on CardSnapshot {
+    cardId
+    slug
+    name
+    type
+    rarity
+    colors
+    keywords
+    effect
+    assets {
+      remote
+      localPath
     }
   }
 `
@@ -105,5 +126,46 @@ export const PLAYER_STATE_FIELDS = gql`
         value
       }
     }
+  }
+`
+
+export const BATTLEFIELD_STATE_FIELDS = gql`
+  ${CARD_SNAPSHOT_FIELDS}
+  fragment BattlefieldStateFields on BattlefieldState {
+    battlefieldId
+    slug
+    name
+    ownerId
+    controller
+    contestedBy
+    lastConqueredTurn
+    lastHoldTurn
+    card {
+      ...CardSnapshotFields
+    }
+  }
+`
+
+export const GAME_PROMPT_FIELDS = gql`
+  fragment GamePromptFields on GamePrompt {
+    id
+    type
+    playerId
+    data
+    resolved
+    createdAt
+    resolvedAt
+    resolution
+  }
+`
+
+export const PRIORITY_WINDOW_FIELDS = gql`
+  fragment PriorityWindowFields on PriorityWindow {
+    id
+    type
+    holder
+    openedAt
+    expiresAt
+    event
   }
 `

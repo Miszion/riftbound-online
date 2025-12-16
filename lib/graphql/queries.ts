@@ -1,8 +1,12 @@
 import { gql } from '@apollo/client';
 import {
   CARD_STATE_FIELDS,
+  CARD_SNAPSHOT_FIELDS,
   PLAYER_BOARD_FIELDS,
   PLAYER_STATE_FIELDS,
+  BATTLEFIELD_STATE_FIELDS,
+  GAME_PROMPT_FIELDS,
+  PRIORITY_WINDOW_FIELDS,
 } from '@/lib/graphql/fragments';
 
 // ============================================================================
@@ -43,6 +47,10 @@ export const GET_LEADERBOARD = gql`
 export const GET_MATCH = gql`
   ${CARD_STATE_FIELDS}
   ${PLAYER_STATE_FIELDS}
+  ${CARD_SNAPSHOT_FIELDS}
+  ${BATTLEFIELD_STATE_FIELDS}
+  ${GAME_PROMPT_FIELDS}
+  ${PRIORITY_WINDOW_FIELDS}
   query GetMatch($matchId: ID!) {
     match(matchId: $matchId) {
       matchId
@@ -64,6 +72,15 @@ export const GET_MATCH = gql`
         reason
         sourceCardId
         timestamp
+      }
+      prompts {
+        ...GamePromptFields
+      }
+      priorityWindow {
+        ...PriorityWindowFields
+      }
+      battlefields {
+        ...BattlefieldStateFields
       }
     }
   }
@@ -196,6 +213,140 @@ export const INIT_MATCH = gql`
   }
 `;
 
+export const SUBMIT_INITIATIVE_CHOICE = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
+  ${CARD_SNAPSHOT_FIELDS}
+  ${BATTLEFIELD_STATE_FIELDS}
+  ${GAME_PROMPT_FIELDS}
+  ${PRIORITY_WINDOW_FIELDS}
+  mutation SubmitInitiativeChoice(
+    $matchId: ID!
+    $playerId: ID!
+    $choice: Int!
+  ) {
+    submitInitiativeChoice(matchId: $matchId, playerId: $playerId, choice: $choice) {
+      matchId
+      winner
+      victoryScore
+      endReason
+      players {
+        ...PlayerStateFields
+      }
+      currentPhase
+      turnNumber
+      currentPlayerIndex
+      status
+      timestamp
+      moveHistory
+      scoreLog {
+        playerId
+        amount
+        reason
+        sourceCardId
+        timestamp
+      }
+      prompts {
+        ...GamePromptFields
+      }
+      priorityWindow {
+        ...PriorityWindowFields
+      }
+      battlefields {
+        ...BattlefieldStateFields
+      }
+    }
+  }
+`;
+
+export const SUBMIT_MULLIGAN = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
+  ${CARD_SNAPSHOT_FIELDS}
+  ${BATTLEFIELD_STATE_FIELDS}
+  ${GAME_PROMPT_FIELDS}
+  ${PRIORITY_WINDOW_FIELDS}
+  mutation SubmitMulligan($matchId: ID!, $playerId: ID!, $indices: [Int!]) {
+    submitMulligan(matchId: $matchId, playerId: $playerId, indices: $indices) {
+      matchId
+      winner
+      victoryScore
+      endReason
+      players {
+        ...PlayerStateFields
+      }
+      currentPhase
+      turnNumber
+      currentPlayerIndex
+      status
+      timestamp
+      moveHistory
+      scoreLog {
+        playerId
+        amount
+        reason
+        sourceCardId
+        timestamp
+      }
+      prompts {
+        ...GamePromptFields
+      }
+      priorityWindow {
+        ...PriorityWindowFields
+      }
+      battlefields {
+        ...BattlefieldStateFields
+      }
+    }
+  }
+`;
+
+export const SELECT_BATTLEFIELD = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
+  ${CARD_SNAPSHOT_FIELDS}
+  ${BATTLEFIELD_STATE_FIELDS}
+  ${GAME_PROMPT_FIELDS}
+  ${PRIORITY_WINDOW_FIELDS}
+  mutation SelectBattlefield($matchId: ID!, $playerId: ID!, $battlefieldId: ID!) {
+    selectBattlefield(
+      matchId: $matchId
+      playerId: $playerId
+      battlefieldId: $battlefieldId
+    ) {
+      matchId
+      winner
+      victoryScore
+      endReason
+      players {
+        ...PlayerStateFields
+      }
+      currentPhase
+      turnNumber
+      currentPlayerIndex
+      status
+      timestamp
+      moveHistory
+      scoreLog {
+        playerId
+        amount
+        reason
+        sourceCardId
+        timestamp
+      }
+      prompts {
+        ...GamePromptFields
+      }
+      priorityWindow {
+        ...PriorityWindowFields
+      }
+      battlefields {
+        ...BattlefieldStateFields
+      }
+    }
+  }
+`;
+
 export const PLAY_CARD = gql`
   ${CARD_STATE_FIELDS}
   ${PLAYER_STATE_FIELDS}
@@ -234,13 +385,44 @@ export const ATTACK = gql`
     $matchId: ID!
     $playerId: ID!
     $creatureInstanceId: String!
-    $defenderId: String
+    $destinationId: String!
   ) {
     attack(
       matchId: $matchId
       playerId: $playerId
       creatureInstanceId: $creatureInstanceId
-      defenderId: $defenderId
+      destinationId: $destinationId
+    ) {
+      success
+      gameState {
+        matchId
+        players {
+          ...PlayerStateFields
+        }
+        currentPhase
+        turnNumber
+        currentPlayerIndex
+        status
+      }
+      currentPhase
+    }
+  }
+`;
+
+export const MOVE_UNIT = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
+  mutation MoveUnit(
+    $matchId: ID!
+    $playerId: ID!
+    $creatureInstanceId: String!
+    $destinationId: String!
+  ) {
+    moveUnit(
+      matchId: $matchId
+      playerId: $playerId
+      creatureInstanceId: $creatureInstanceId
+      destinationId: $destinationId
     ) {
       success
       gameState {
@@ -668,6 +850,7 @@ export const GET_MATCHMAKING_STATUS = gql`
       estimatedWaitSeconds
       matchId
       opponentId
+      opponentName
     }
   }
 `;
@@ -680,6 +863,7 @@ export const JOIN_MATCHMAKING_QUEUE = gql`
       matchFound
       matchId
       opponentId
+      opponentName
       mmr
       estimatedWaitSeconds
     }
