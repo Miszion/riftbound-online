@@ -310,16 +310,6 @@ function DeckbuilderView() {
       if (!entry) {
         return undefined
       }
-      const entrySlug = entry.slug?.toLowerCase()
-      if (entrySlug) {
-        const foundBySlug = cards.find((card) => card.slug?.toLowerCase() === entrySlug)
-        if (foundBySlug) {
-          return foundBySlug
-        }
-      }
-      if (entry.cardId) {
-        return cards.find((card) => card.id === entry.cardId)
-      }
       if (entry.cardSnapshot) {
         const snapshot = entry.cardSnapshot
         const fallbackId =
@@ -339,6 +329,16 @@ function DeckbuilderView() {
             localPath: snapshot.assets?.localPath ?? '',
           },
         }
+      }
+      const entrySlug = entry.slug?.toLowerCase()
+      if (entrySlug) {
+        const foundBySlug = cards.find((card) => card.slug?.toLowerCase() === entrySlug)
+        if (foundBySlug) {
+          return foundBySlug
+        }
+      }
+      if (entry.cardId) {
+        return cards.find((card) => card.id === entry.cardId)
       }
       return undefined
     },
@@ -432,17 +432,22 @@ function DeckbuilderView() {
         return null
       }
 
-      const applySnapshots = (entries?: DeckCardDTO[] | null) =>
-        entries?.map((entry) => {
-          if (!entry) {
-            return entry
-          }
-          if (entry.cardSnapshot) {
+      const applySnapshotsOptional = (entries?: DeckCardDTO[] | null): DeckCardDTO[] | undefined => {
+        if (!entries) {
+          return undefined
+        }
+        return entries.map((entry) => {
+          if (!entry || entry.cardSnapshot) {
             return entry
           }
           const hydrated = pickSnapshot(entry)
           return hydrated ? { ...entry, cardSnapshot: hydrated } : entry
-        }) ?? entries
+        })
+      }
+
+      const applySnapshotsRequired = (entries?: DeckCardDTO[] | null): DeckCardDTO[] => {
+        return applySnapshotsOptional(entries) ?? []
+      }
 
       const applySingle = (entry?: DeckCardDTO | null) => {
         if (!entry || entry.cardSnapshot) {
@@ -454,10 +459,10 @@ function DeckbuilderView() {
 
       return {
         ...deck,
-        cards: applySnapshots(deck.cards),
-        runeDeck: applySnapshots(deck.runeDeck),
-        battlefields: applySnapshots(deck.battlefields),
-        sideDeck: applySnapshots(deck.sideDeck),
+        cards: applySnapshotsRequired(deck.cards),
+        runeDeck: applySnapshotsOptional(deck.runeDeck),
+        battlefields: applySnapshotsOptional(deck.battlefields),
+        sideDeck: applySnapshotsOptional(deck.sideDeck),
         championLegend: applySingle(deck.championLegend),
         championLeader: applySingle(deck.championLeader),
       }
@@ -1115,6 +1120,15 @@ const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'ma
     if (!deckName.trim()) {
       pushToast('Provide a deck name before saving.', 'error')
       return
+    }
+
+    const normalizedName = deckName.trim().toLowerCase()
+    if (!activeDeckId) {
+      const duplicate = savedDecks.some((deck) => deck.name.trim().toLowerCase() === normalizedName)
+      if (duplicate) {
+        pushToast('A deck with this name already exists. Choose a different name.', 'error')
+        return
+      }
     }
 
     if (!userId) {
