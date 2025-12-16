@@ -347,6 +347,44 @@ export const GET_CARD_CATALOG = gql`
   }
 `;
 
+export const GET_CARD_BY_SLUG = gql`
+  query CardBySlug($slug: String!) {
+    cardBySlug(slug: $slug) {
+      id
+      slug
+      name
+      type
+      rarity
+      colors
+      keywords
+      effect
+      assets {
+        remote
+        localPath
+      }
+    }
+  }
+`;
+
+export const GET_CARD_BY_ID = gql`
+  query CardById($id: ID!) {
+    cardById(id: $id) {
+      id
+      slug
+      name
+      type
+      rarity
+      colors
+      keywords
+      effect
+      assets {
+        remote
+        localPath
+      }
+    }
+  }
+`;
+
 export const GET_DECKLISTS = gql`
   query Decklists($userId: ID!) {
     decklists(userId: $userId) {
@@ -363,11 +401,115 @@ export const GET_DECKLISTS = gql`
         cardId
         slug
         quantity
+        cardSnapshot {
+          cardId
+          slug
+          name
+          type
+          rarity
+          colors
+          keywords
+          effect
+          assets {
+            remote
+            localPath
+          }
+        }
       }
       runeDeck {
         cardId
         slug
         quantity
+        cardSnapshot {
+          cardId
+          slug
+          name
+          type
+          rarity
+          colors
+          keywords
+          effect
+          assets {
+            remote
+            localPath
+          }
+        }
+      }
+      battlefields {
+        cardId
+        slug
+        quantity
+        cardSnapshot {
+          cardId
+          slug
+          name
+          type
+          rarity
+          colors
+          keywords
+          effect
+          assets {
+            remote
+            localPath
+          }
+        }
+      }
+      sideDeck {
+        cardId
+        slug
+        quantity
+        cardSnapshot {
+          cardId
+          slug
+          name
+          type
+          rarity
+          colors
+          keywords
+          effect
+          assets {
+            remote
+            localPath
+          }
+        }
+      }
+      championLegend {
+        cardId
+        slug
+        quantity
+        cardSnapshot {
+          cardId
+          slug
+          name
+          type
+          rarity
+          colors
+          keywords
+          effect
+          assets {
+            remote
+            localPath
+          }
+        }
+      }
+      championLeader {
+        cardId
+        slug
+        quantity
+        cardSnapshot {
+          cardId
+          slug
+          name
+          type
+          rarity
+          colors
+          keywords
+          effect
+          assets {
+            remote
+            localPath
+          }
+        }
       }
       createdAt
       updatedAt
@@ -391,11 +533,115 @@ export const SAVE_DECKLIST = gql`
         cardId
         slug
         quantity
+        cardSnapshot {
+          cardId
+          slug
+          name
+          type
+          rarity
+          colors
+          keywords
+          effect
+          assets {
+            remote
+            localPath
+          }
+        }
       }
       runeDeck {
         cardId
         slug
         quantity
+        cardSnapshot {
+          cardId
+          slug
+          name
+          type
+          rarity
+          colors
+          keywords
+          effect
+          assets {
+            remote
+            localPath
+          }
+        }
+      }
+      battlefields {
+        cardId
+        slug
+        quantity
+        cardSnapshot {
+          cardId
+          slug
+          name
+          type
+          rarity
+          colors
+          keywords
+          effect
+          assets {
+            remote
+            localPath
+          }
+        }
+      }
+      sideDeck {
+        cardId
+        slug
+        quantity
+        cardSnapshot {
+          cardId
+          slug
+          name
+          type
+          rarity
+          colors
+          keywords
+          effect
+          assets {
+            remote
+            localPath
+          }
+        }
+      }
+      championLegend {
+        cardId
+        slug
+        quantity
+        cardSnapshot {
+          cardId
+          slug
+          name
+          type
+          rarity
+          colors
+          keywords
+          effect
+          assets {
+            remote
+            localPath
+          }
+        }
+      }
+      championLeader {
+        cardId
+        slug
+        quantity
+        cardSnapshot {
+          cardId
+          slug
+          name
+          type
+          rarity
+          colors
+          keywords
+          effect
+          assets {
+            remote
+            localPath
+          }
+        }
       }
       createdAt
       updatedAt
