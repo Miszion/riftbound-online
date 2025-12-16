@@ -1,25 +1,30 @@
 'use client'
 
-import Link from 'next/link'
+import { useEffect, useRef } from 'react'
+import { useRouter } from 'next/navigation'
 import { useAuth } from '@/hooks/useAuth'
+import useToasts from '@/hooks/useToasts'
 
 export default function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user } = useAuth()
+  const router = useRouter()
+  const { pushToast } = useToasts()
+  const warnedRef = useRef(false)
+
+  useEffect(() => {
+    if (!user) {
+      if (!warnedRef.current) {
+        pushToast('Please sign in to continue.', 'warning')
+        warnedRef.current = true
+      }
+      router.replace('/sign-in')
+    } else {
+      warnedRef.current = false
+    }
+  }, [user, router, pushToast])
 
   if (!user) {
-    return (
-      <div className="protected-gate">
-        <div className="protected-card">
-          <h2>Sign in required</h2>
-          <p className="muted">
-            Access to Deckbuilder, Matchmaking, and Spectate is restricted. Please sign in to continue.
-          </p>
-          <Link href="/sign-in" className="btn primary">
-            Go to Sign In
-          </Link>
-        </div>
-      </div>
-    )
+    return null
   }
 
   return <>{children}</>

@@ -9,9 +9,9 @@ export default function Home() {
   return (
     <>
       <Header />
-      <main>
+      <main className="home-main">
         <section className="hero">
-          <div className="container hero-inner">
+          <div className="home-container hero-inner">
             <div className="hero-text">
               <h2>Take command of the rift</h2>
               <p>
@@ -39,28 +39,20 @@ export default function Home() {
               </p>
             </div>
             <div className="hero-art">
-              <div className="card-slab">
-                <RiftboundCard
-                  title="Viktor"
-                  cardType="champion"
-                  imageSrc="/images/viktor.jpg"
-                />
-                <RiftboundCard
-                  title="Falling Star"
-                  cardType="spell"
-                  imageSrc="/images/falling-star.jpg"
-                />
-                <RiftboundCard
-                  title="Mind Rune"
-                  cardType="rune"
-                  imageSrc="/images/mind-rune.jpg"
-                />
+              <div className="card-showcase">
+                <div className="card-tier top-tier">
+                  <RiftboundCard title="Falling Star" cardType="spell" imageSrc="/images/falling-star.jpg" />
+                </div>
+                <div className="card-tier bottom-tier">
+                  <RiftboundCard title="Viktor" cardType="champion" imageSrc="/images/viktor.jpg" />
+                  <RiftboundCard title="Mind Rune" cardType="rune" imageSrc="/images/mind-rune.jpg" />
+                </div>
               </div>
             </div>
           </div>
         </section>
 
-        <section className="features container">
+        <section className="features home-container">
           <h3>Features</h3>
           <div className="grid">
             <div className="feature">

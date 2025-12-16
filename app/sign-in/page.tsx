@@ -6,6 +6,8 @@ import { useRouter } from 'next/navigation'
 import Header from '@/components/Header'
 import Footer from '@/components/Footer'
 import { useAuth } from '@/hooks/useAuth'
+import LoadingSpinner from '@/components/ui/LoadingSpinner'
+import useToasts from '@/hooks/useToasts'
 
 type Mode = 'sign-in' | 'sign-up'
 
@@ -14,37 +16,33 @@ export default function SignIn() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [username, setUsername] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const [status, setStatus] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const router = useRouter()
   const { signIn, signUp } = useAuth()
+  const { pushToast } = useToasts()
 
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
-    setError(null)
-    setStatus(null)
     setLoading(true)
 
     try {
       if (mode === 'sign-in') {
         await signIn(email, password)
+        pushToast('Signed in successfully', 'success')
         router.push('/')
       } else {
         await signUp({ email, password, username })
-        setStatus('Account created! Please sign in.')
+        pushToast('Account created! Please sign in.', 'success')
         setMode('sign-in')
       }
     } catch (err: any) {
-      setError(err?.message ?? 'Request failed')
+      pushToast(err?.message ?? 'Request failed', err?.status === 401 ? 'warning' : 'error')
     } finally {
       setLoading(false)
     }
   }
 
   const toggleMode = () => {
-    setError(null)
-    setStatus(null)
     setMode((prev) => (prev === 'sign-in' ? 'sign-up' : 'sign-in'))
   }
 
@@ -53,6 +51,11 @@ export default function SignIn() {
       <Header />
       <main className="sign-container">
         <div className="sign-card">
+          {loading && (
+            <div className="sign-spinner-overlay" aria-live="polite">
+              <LoadingSpinner size="lg" label="Signing in" />
+            </div>
+          )}
           <h2>{mode === 'sign-in' ? 'Sign in' : 'Create an account'}</h2>
           <form onSubmit={handleSubmit}>
             <label htmlFor="email">Email</label>
@@ -92,17 +95,6 @@ export default function SignIn() {
               minLength={6}
               autoComplete={mode === 'sign-in' ? 'current-password' : 'new-password'}
             />
-
-            {error && (
-              <p className="muted small" style={{ color: 'var(--danger-color)' }}>
-                {error}
-              </p>
-            )}
-            {status && (
-              <p className="muted small" style={{ color: 'var(--success-color)' }}>
-                {status}
-              </p>
-            )}
 
             <button className="primary" type="submit" disabled={loading}>
               {loading ? 'Please wait…' : mode === 'sign-in' ? 'Sign In' : 'Sign Up'}

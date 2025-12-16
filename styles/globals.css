@@ -35,6 +35,16 @@ body {
   padding: 1rem;
 }
 
+.home-main {
+  width: 100%;
+}
+
+.home-container {
+  max-width: 1800px;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+
 .deckbuilder.container {
   max-width: 1800px;
 }
@@ -200,6 +210,19 @@ body {
   margin-left: auto;
 }
 
+.user-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, rgba(109, 211, 255, 0.6), rgba(155, 124, 255, 0.6));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  color: #031021;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
 .logo {
   margin: 0;
   font-size: 1.15rem;
@@ -274,13 +297,28 @@ body {
 
 /* Hero */
 .hero {
-  padding: 3rem 0;
+  padding: 5rem 0 4.5rem;
+  background: radial-gradient(circle at top left, rgba(109, 211, 255, 0.25), transparent 45%),
+    radial-gradient(circle at top right, rgba(155, 124, 255, 0.2), transparent 40%),
+    rgba(7, 16, 33, 0.85);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .hero-inner {
   display: flex;
-  gap: 2rem;
-  align-items: center;
+  gap: 4rem;
+  align-items: flex-start;
+  padding-top: 1.5rem;
+}
+
+.hero-text,
+.hero-art {
+  flex: 1;
+}
+
+.hero-art {
+  display: flex;
+  justify-content: center;
 }
 
 .hero-text h2 {
@@ -316,16 +354,45 @@ body {
 }
 
 /* Card display */
-.card-slab {
+.card-showcase {
+  position: relative;
+  width: min(520px, 100%);
   display: flex;
   flex-direction: column;
-  gap: 1.2rem;
+  gap: 1.5rem;
   align-items: center;
+}
+
+.card-tier {
+  display: flex;
+  gap: 2rem;
+  justify-content: center;
+  width: 100%;
+}
+
+.card-tier.top-tier {
+  justify-content: center;
+}
+
+.card-tier.bottom-tier {
+  justify-content: space-between;
+}
+
+.card-tier :global(.riftbound-card) {
+  width: 240px;
+  height: 360px;
+  box-shadow: 0 25px 45px rgba(0, 0, 0, 0.45);
+  transform: translateZ(0);
+  transition: transform 0.2s ease;
+}
+
+.card-tier :global(.riftbound-card:hover) {
+  transform: translateY(-6px);
 }
 
 /* Features */
 .features {
-  padding: 2rem 0;
+  padding: 2.5rem 0;
 }
 
 .features h3 {
@@ -334,8 +401,8 @@ body {
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1.5rem;
 }
 
 .feature {
@@ -368,6 +435,19 @@ body {
   min-width: 320px;
   max-width: 420px;
   border: 1px solid rgba(255, 255, 255, 0.03);
+  position: relative;
+  overflow: hidden;
+}
+
+.sign-spinner-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(7, 12, 24, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(2px);
+  z-index: 5;
 }
 
 .sign-card h2 {

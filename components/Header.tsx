@@ -6,7 +6,8 @@ import { useAuth } from '@/hooks/useAuth'
 
 export default function Header() {
   const { user, logout } = useAuth()
-  const displayName = user?.username || user?.email || user?.userId
+  const displayName = user?.username || user?.email || user?.userId || 'Player'
+  const avatarLetter = displayName.trim().charAt(0).toUpperCase()
   const [menuOpen, setMenuOpen] = useState(false)
 
   const navLinks = user
@@ -49,6 +50,9 @@ export default function Header() {
         <div className="header-actions">
           {user ? (
             <>
+              <div className="user-avatar" aria-hidden="true">
+                {avatarLetter || 'U'}
+              </div>
               <span className="user-pill">{displayName}</span>
               <button className="btn secondary" onClick={logout}>
                 Sign Out

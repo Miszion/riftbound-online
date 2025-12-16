@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import Providers from './providers'
 import '../styles/globals.css'
 import GlobalLoadingOverlay from '@/components/ui/GlobalLoadingOverlay'
+import ToastProvider from '@/components/ui/ToastProvider'
 
 export const metadata: Metadata = {
   title: 'Riftbound Online',
@@ -18,8 +19,10 @@ export default function RootLayout({
     <html lang="en">
       <body>
         <Providers>
-          <GlobalLoadingOverlay />
-          {children}
+          <ToastProvider>
+            <GlobalLoadingOverlay />
+            {children}
+          </ToastProvider>
         </Providers>
       </body>
     </html>
