@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { useQuery, useMutation, useSubscription } from '@apollo/client';
 import {
   GET_USER,
@@ -35,6 +36,7 @@ import {
   CARD_PLAYED,
   ATTACK_DECLARED,
   PHASE_CHANGED,
+  MATCHMAKING_STATUS_UPDATED,
 } from '@/lib/graphql/subscriptions';
 
 // ============================================================================
@@ -165,13 +167,40 @@ export function useMatchmakingStatus(
   mode: 'ranked' | 'free',
   pollInterval = 5000
 ) {
-  return useQuery(GET_MATCHMAKING_STATUS, {
-    variables: { userId: userId || '', mode },
-    skip: !userId,
-    pollInterval: userId ? pollInterval : undefined,
+  const variables = useMemo(
+    () => ({
+      userId: userId || '',
+      mode,
+    }),
+    [userId, mode]
+  );
+
+  const skip = !userId;
+  const queryResult = useQuery(GET_MATCHMAKING_STATUS, {
+    variables,
+    skip,
+    pollInterval: !skip ? pollInterval : undefined,
     context: { skipNetworkActivity: true },
     notifyOnNetworkStatusChange: false,
   });
+
+  useSubscription(MATCHMAKING_STATUS_UPDATED, {
+    variables,
+    skip,
+    onData: ({ data, client }) => {
+      const payload = data.data?.matchmakingStatusUpdated;
+      if (!payload) {
+        return;
+      }
+      client.writeQuery({
+        query: GET_MATCHMAKING_STATUS,
+        variables,
+        data: { matchmakingStatus: payload },
+      });
+    },
+  });
+
+  return queryResult;
 }
 
 export function useJoinMatchmakingQueue() {

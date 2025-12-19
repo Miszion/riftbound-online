@@ -22,7 +22,10 @@ import {
   CacheCookieBehavior,
   CacheQueryStringBehavior,
   ResponseHeadersPolicy,
-  SecurityPolicyProtocol
+  SecurityPolicyProtocol,
+  Function as CloudFrontFunction,
+  FunctionCode,
+  FunctionEventType
 } from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 
@@ -82,6 +85,29 @@ export class RiftboundUiStack extends Stack {
       }
     });
 
+    const rewriteFunction = new CloudFrontFunction(this, 'RewriteDirectoryIndexFn', {
+      functionName: `riftbound-ui-rewrite-${stage}`,
+      code: FunctionCode.fromInline(`
+        function handler(event) {
+          var request = event.request;
+          var uri = request.uri;
+          if (uri.startsWith('/game/')) {
+            var remainder = uri.substring(6);
+            if (remainder && remainder.indexOf('.') === -1) {
+              request.uri = '/game/index.html';
+              return request;
+            }
+          }
+          if (uri.endsWith('/')) {
+            request.uri = uri + 'index.html';
+          } else if (!uri.includes('.')) {
+            request.uri = uri + '/index.html';
+          }
+          return request;
+        }
+      `)
+    });
+
     const distribution = new Distribution(this, 'SiteDistribution', {
       defaultBehavior: {
         origin: new origins.S3Origin(siteBucket, {
@@ -91,7 +117,13 @@ export class RiftboundUiStack extends Stack {
         cachedMethods: CachedMethods.CACHE_GET_HEAD,
         cachePolicy,
         viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        responseHeadersPolicy: headersPolicy
+        responseHeadersPolicy: headersPolicy,
+        functionAssociations: [
+          {
+            eventType: FunctionEventType.VIEWER_REQUEST,
+            function: rewriteFunction
+          }
+        ]
       },
       defaultRootObject: 'index.html',
       comment: `Riftbound UI ${stage}`,

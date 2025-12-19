@@ -934,7 +934,7 @@ button.primary {
 }
 
 .deck-track-main .deck-grid {
-  min-width: calc((var(--deck-card-width) * 10) + (0.45rem * 9));
+  min-width: calc((var(--deck-card-width) * 7) + (0.45rem * 6));
 }
 
 .champion-track {
@@ -1053,12 +1053,12 @@ button.primary {
 
 .deck-grid {
   display: grid;
-  grid-template-columns: repeat(10, var(--deck-card-width));
+  grid-template-columns: repeat(7, var(--deck-card-width));
   grid-template-rows: repeat(3, var(--deck-card-height));
   gap: 0.45rem;
   margin-top: 1rem;
   width: max-content;
-  min-width: calc((var(--deck-card-width) * 10) + (0.45rem * 9));
+  min-width: calc((var(--deck-card-width) * 7) + (0.45rem * 6));
   justify-content: flex-start;
 }
 
@@ -1086,7 +1086,7 @@ button.primary {
 
 .side-grid {
   display: grid;
-  grid-template-columns: repeat(8, var(--deck-card-width));
+  grid-template-columns: repeat(7, var(--deck-card-width));
   grid-auto-rows: var(--deck-card-height);
   gap: 0.45rem;
   margin-top: 0.75rem;

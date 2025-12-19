@@ -1,6 +1,7 @@
 'use client'
 
 import { createContext, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { API_BASE_URL } from '@/lib/apiConfig'
 
 export interface AuthSession {
@@ -42,6 +43,30 @@ interface AuthContextValue {
 }
 
 const STORAGE_KEY = 'riftbound:user'
+const MAX_TOKEN_AGE_MS = 60 * 60 * 1000
+const TOKEN_CHECK_INTERVAL_MS = 15_000
+
+const clampExpiry = (target?: number | null, fallback?: number | null): number => {
+  const base =
+    typeof target === 'number' && Number.isFinite(target)
+      ? target
+      : typeof fallback === 'number' && Number.isFinite(fallback)
+        ? fallback
+        : Date.now() + MAX_TOKEN_AGE_MS
+  return Math.min(base, Date.now() + MAX_TOKEN_AGE_MS)
+}
+
+const computeExpiresAt = (expiresAt?: number | null, expiresIn?: number | null): number => {
+  const fallback = typeof expiresIn === 'number' ? Date.now() + expiresIn * 1000 : null
+  return clampExpiry(expiresAt, fallback)
+}
+
+const hasExpired = (expiresAt?: number | null) => {
+  if (!expiresAt || !Number.isFinite(expiresAt)) {
+    return true
+  }
+  return Date.now() >= expiresAt
+}
 
 const decodeJwtClaims = (token?: string): Record<string, any> | null => {
   if (!token || typeof window === 'undefined' || typeof window.atob !== 'function') {
@@ -70,7 +95,7 @@ const deriveUsername = (token?: string, fallback?: string): string | undefined =
 }
 
 const toSession = (payload: SignInResponse): AuthSession => {
-  const fallbackExpiry = payload.expiresIn ? Date.now() + payload.expiresIn * 1000 : Date.now() + 3600 * 1000
+  const expiry = computeExpiresAt(payload.expiresAt, payload.expiresIn ?? null)
   const username = payload.username ?? deriveUsername(payload.idToken, payload.email)
   return {
     userId: payload.userId,
@@ -79,7 +104,7 @@ const toSession = (payload: SignInResponse): AuthSession => {
     idToken: payload.idToken,
     accessToken: payload.accessToken,
     refreshToken: payload.refreshToken,
-    expiresAt: payload.expiresAt ?? fallbackExpiry,
+    expiresAt: expiry,
   }
 }
 
@@ -113,13 +138,29 @@ export const AuthContext = createContext<AuthContextValue | undefined>(undefined
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthSession | null>(null)
   const refreshTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const router = useRouter()
+  const expiryWatcher = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const persistSession = useCallback((session: AuthSession) => {
-    setUser(session)
+    const normalized: AuthSession = {
+      ...session,
+      expiresAt: clampExpiry(session.expiresAt)
+    }
+    setUser(normalized)
     if (typeof window !== 'undefined') {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session))
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized))
     }
   }, [])
+
+  const redirectToSignIn = useCallback(() => {
+    if (typeof window !== 'undefined') {
+      if (window.location.pathname !== '/sign-in') {
+        window.location.href = '/sign-in'
+      }
+    } else {
+      router.replace('/sign-in')
+    }
+  }, [router])
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -132,14 +173,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const parsed = JSON.parse(stored) as AuthSession
       if (parsed?.userId && parsed?.refreshToken) {
-        setUser(parsed)
+        const normalized: AuthSession = {
+          ...parsed,
+          expiresAt: clampExpiry(parsed.expiresAt ?? null)
+        }
+        if (hasExpired(normalized.expiresAt)) {
+          window.localStorage.removeItem(STORAGE_KEY)
+          redirectToSignIn()
+          return
+        }
+        setUser(normalized)
       } else {
         window.localStorage.removeItem(STORAGE_KEY)
       }
     } catch {
       window.localStorage.removeItem(STORAGE_KEY)
     }
-  }, [])
+  }, [redirectToSignIn])
 
   const logout = useCallback(() => {
     setUser(null)
@@ -175,16 +225,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const nextSession: AuthSession = {
       userId: response.userId || user.userId,
       email: user.email,
-       username: deriveUsername(response.idToken, user.username || user.email),
+      username: deriveUsername(response.idToken, user.username || user.email),
       idToken: response.idToken,
       accessToken: response.accessToken,
       refreshToken: response.refreshToken || user.refreshToken,
-      expiresAt:
-        response.expiresAt ||
-        (response.expiresIn ? Date.now() + response.expiresIn * 1000 : Date.now() + 3600 * 1000),
+      expiresAt: computeExpiresAt(response.expiresAt, response.expiresIn ?? null),
     }
     persistSession(nextSession)
   }, [user, persistSession])
+
+  const handleSessionExpired = useCallback(() => {
+    logout()
+    redirectToSignIn()
+  }, [logout, redirectToSignIn])
 
   useEffect(() => {
     if (!user?.refreshToken) {
@@ -199,7 +252,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     refreshTimeout.current = setTimeout(() => {
       refreshSession().catch((error) => {
         console.error('Session refresh failed', error)
-        logout()
+        handleSessionExpired()
       })
     }, msUntilRefresh)
 
@@ -209,7 +262,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         refreshTimeout.current = null
       }
     }
-  }, [user, refreshSession, logout])
+  }, [user, refreshSession, handleSessionExpired])
+
+  useEffect(() => {
+    if (expiryWatcher.current) {
+      clearInterval(expiryWatcher.current)
+      expiryWatcher.current = null
+    }
+    if (!user) {
+      return
+    }
+    if (hasExpired(user.expiresAt)) {
+      handleSessionExpired()
+      return
+    }
+    expiryWatcher.current = setInterval(() => {
+      if (hasExpired(user.expiresAt)) {
+        handleSessionExpired()
+      }
+    }, TOKEN_CHECK_INTERVAL_MS)
+    return () => {
+      if (expiryWatcher.current) {
+        clearInterval(expiryWatcher.current)
+        expiryWatcher.current = null
+      }
+    }
+  }, [user, handleSessionExpired])
 
   const value = useMemo(
     () => ({

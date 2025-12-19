@@ -388,6 +388,36 @@
               "version": "2.152.0"
             }
           },
+          "RewriteDirectoryIndexFn": {
+            "id": "RewriteDirectoryIndexFn",
+            "path": "RiftboundUiStack-dev/RewriteDirectoryIndexFn",
+            "children": {
+              "Resource": {
+                "id": "Resource",
+                "path": "RiftboundUiStack-dev/RewriteDirectoryIndexFn/Resource",
+                "attributes": {
+                  "aws:cdk:cloudformation:type": "AWS::CloudFront::Function",
+                  "aws:cdk:cloudformation:props": {
+                    "autoPublish": true,
+                    "functionCode": "\n        function handler(event) {\n          var request = event.request;\n          var uri = request.uri;\n          if (uri.startsWith('/game/')) {\n            var remainder = uri.substring(6);\n            if (remainder && remainder.indexOf('.') === -1) {\n              request.uri = '/game/index.html';\n              return request;\n            }\n          }\n          if (uri.endsWith('/')) {\n            request.uri = uri + 'index.html';\n          } else if (!uri.includes('.')) {\n            request.uri = uri + '/index.html';\n          }\n          return request;\n        }\n      ",
+                    "functionConfig": {
+                      "comment": "riftbound-ui-rewrite-dev",
+                      "runtime": "cloudfront-js-1.0"
+                    },
+                    "name": "riftbound-ui-rewrite-dev"
+                  }
+                },
+                "constructInfo": {
+                  "fqn": "aws-cdk-lib.aws_cloudfront.CfnFunction",
+                  "version": "2.152.0"
+                }
+              }
+            },
+            "constructInfo": {
+              "fqn": "aws-cdk-lib.aws_cloudfront.Function",
+              "version": "2.152.0"
+            }
+          },
           "SiteDistribution": {
             "id": "SiteDistribution",
             "path": "RiftboundUiStack-dev/SiteDistribution",
@@ -451,7 +481,18 @@
                         "responseHeadersPolicyId": {
                           "Ref": "UiResponseHeaders3A7BA114"
                         },
-                        "viewerProtocolPolicy": "redirect-to-https"
+                        "viewerProtocolPolicy": "redirect-to-https",
+                        "functionAssociations": [
+                          {
+                            "functionArn": {
+                              "Fn::GetAtt": [
+                                "RewriteDirectoryIndexFnA9EAF5F8",
+                                "FunctionARN"
+                              ]
+                            },
+                            "eventType": "viewer-request"
+                          }
+                        ]
                       },
                       "comment": "Riftbound UI dev",
                       "customErrorResponses": [

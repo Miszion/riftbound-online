@@ -333,6 +333,21 @@
     "aws:cdk:path": "RiftboundUiStack-dev/UiResponseHeaders/Resource"
    }
   },
+  "RewriteDirectoryIndexFnA9EAF5F8": {
+   "Type": "AWS::CloudFront::Function",
+   "Properties": {
+    "AutoPublish": true,
+    "FunctionCode": "\n        function handler(event) {\n          var request = event.request;\n          var uri = request.uri;\n          if (uri.startsWith('/game/')) {\n            var remainder = uri.substring(6);\n            if (remainder && remainder.indexOf('.') === -1) {\n              request.uri = '/game/index.html';\n              return request;\n            }\n          }\n          if (uri.endsWith('/')) {\n            request.uri = uri + 'index.html';\n          } else if (!uri.includes('.')) {\n            request.uri = uri + '/index.html';\n          }\n          return request;\n        }\n      ",
+    "FunctionConfig": {
+     "Comment": "riftbound-ui-rewrite-dev",
+     "Runtime": "cloudfront-js-1.0"
+    },
+    "Name": "riftbound-ui-rewrite-dev"
+   },
+   "Metadata": {
+    "aws:cdk:path": "RiftboundUiStack-dev/RewriteDirectoryIndexFn/Resource"
+   }
+  },
   "SiteDistribution3FF9535D": {
    "Type": "AWS::CloudFront::Distribution",
    "Properties": {
@@ -366,6 +381,17 @@
        "HEAD"
       ],
       "Compress": true,
+      "FunctionAssociations": [
+       {
+        "EventType": "viewer-request",
+        "FunctionARN": {
+         "Fn::GetAtt": [
+          "RewriteDirectoryIndexFnA9EAF5F8",
+          "FunctionARN"
+         ]
+        }
+       }
+      ],
       "ResponseHeadersPolicyId": {
        "Ref": "UiResponseHeaders3A7BA114"
       },
@@ -409,7 +435,7 @@
   "CDKMetadata": {
    "Type": "AWS::CDK::Metadata",
    "Properties": {
-    "Analytics": "v2:deflate64:H4sIAAAAAAAA/22Q0W7CMAxFv2XvabYW8QHQadqeQPABU3AMMy0xih2mqeq/L10rlUk82dc+9ypxZctlZV+e3LcU4JuipYPt9uqgMXn02cnCdusEDaqpj2HqxrLlluBnHo+6N9By8sfIQW23iXSisAJAkQ+PQUn/HPXAvA3MY8LBF87593KHcuUg+I7OY5QZerx4JdFIh6TEYaDudd+bOonyJVs5RcApZur/rbaRb5Rz107QrERQ85Hyw0+DZ5P0mrQ3gT3aszzfqoUty3zVsxAVMeVPXdDuxvoLS5v/sXIBAAA="
+    "Analytics": "v2:deflate64:H4sIAAAAAAAA/21Q0W7CMAz8lr2ngRbxAdAJsScQ+4ApOIaZlgTFDmiq+u+ka0eZxJPvfOez7ELn80JP38yNM7BVVtNeN59ioFKp9dXwTDfLCBWKKg9uQH3Z+prgZ2z3vFVQ+2gPwTvRzSbQkdwCAJk/LDoh+Z0oO8+q87x2GPjGMf+Z7pAv3jGu0VgMPJpeC6voQMi7zvHA78QSaB//hGfetqqMLP6c8nwMgEP2gP9J2+CvlJYtDaNaMKOkz6Vrjt3MJsolSquct6hPPLkWM53n6dUnJspCTJeeUe/6egeHeFD9hwEAAA=="
    },
    "Metadata": {
     "aws:cdk:path": "RiftboundUiStack-dev/CDKMetadata/Default"

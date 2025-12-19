@@ -169,3 +169,17 @@ export const PRIORITY_WINDOW_FIELDS = gql`
     event
   }
 `
+
+export const MATCHMAKING_STATUS_FIELDS = gql`
+  fragment MatchmakingStatusFields on MatchmakingStatus {
+    mode
+    state
+    queued
+    mmr
+    queuedAt
+    estimatedWaitSeconds
+    matchId
+    opponentId
+    opponentName
+  }
+`

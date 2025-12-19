@@ -7,6 +7,7 @@ import {
   BATTLEFIELD_STATE_FIELDS,
   GAME_PROMPT_FIELDS,
   PRIORITY_WINDOW_FIELDS,
+  MATCHMAKING_STATUS_FIELDS,
 } from '@/lib/graphql/fragments';
 
 // ============================================================================
@@ -65,6 +66,10 @@ export const GET_MATCH = gql`
       currentPlayerIndex
       status
       timestamp
+      initiativeWinner
+      initiativeLoser
+      initiativeSelections
+      initiativeDecidedAt
       moveHistory
       scoreLog {
         playerId
@@ -840,17 +845,10 @@ export const DELETE_DECKLIST = gql`
 `;
 
 export const GET_MATCHMAKING_STATUS = gql`
+  ${MATCHMAKING_STATUS_FIELDS}
   query MatchmakingStatus($userId: ID!, $mode: MatchMode!) {
     matchmakingStatus(userId: $userId, mode: $mode) {
-      mode
-      state
-      queued
-      mmr
-      queuedAt
-      estimatedWaitSeconds
-      matchId
-      opponentId
-      opponentName
+      ...MatchmakingStatusFields
     }
   }
 `;

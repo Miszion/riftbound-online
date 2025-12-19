@@ -15,7 +15,7 @@
         }
       }
     },
-    "a33de26e483c488729c9582fc5d6690193117ffd1e733802a5c0db42eda96ab0": {
+    "68797da8ce5e4cc3aa2d7f53e4934a323bef3c8c9929489e1c09e2d4d0a6942c": {
       "source": {
         "path": "RiftboundUiStack-dev.template.json",
         "packaging": "file"
@@ -23,7 +23,7 @@
       "destinations": {
         "778198285154-us-east-1": {
           "bucketName": "cdk-hnb659fds-assets-778198285154-us-east-1",
-          "objectKey": "a33de26e483c488729c9582fc5d6690193117ffd1e733802a5c0db42eda96ab0.json",
+          "objectKey": "68797da8ce5e4cc3aa2d7f53e4934a323bef3c8c9929489e1c09e2d4d0a6942c.json",
           "region": "us-east-1",
           "assumeRoleArn": "arn:${AWS::Partition}:iam::778198285154:role/cdk-hnb659fds-file-publishing-role-778198285154-us-east-1"
         }

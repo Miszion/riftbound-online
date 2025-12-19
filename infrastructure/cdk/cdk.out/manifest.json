@@ -18,7 +18,7 @@
         "validateOnSynth": false,
         "assumeRoleArn": "arn:${AWS::Partition}:iam::778198285154:role/cdk-hnb659fds-deploy-role-778198285154-us-east-1",
         "cloudFormationExecutionRoleArn": "arn:${AWS::Partition}:iam::778198285154:role/cdk-hnb659fds-cfn-exec-role-778198285154-us-east-1",
-        "stackTemplateAssetObjectUrl": "s3://cdk-hnb659fds-assets-778198285154-us-east-1/a33de26e483c488729c9582fc5d6690193117ffd1e733802a5c0db42eda96ab0.json",
+        "stackTemplateAssetObjectUrl": "s3://cdk-hnb659fds-assets-778198285154-us-east-1/68797da8ce5e4cc3aa2d7f53e4934a323bef3c8c9929489e1c09e2d4d0a6942c.json",
         "requiresBootstrapStackVersion": 6,
         "bootstrapStackVersionSsmParameter": "/cdk-bootstrap/hnb659fds/version",
         "additionalDependencies": [
@@ -80,6 +80,12 @@
           {
             "type": "aws:cdk:logicalId",
             "data": "UiResponseHeaders3A7BA114"
+          }
+        ],
+        "/RiftboundUiStack-dev/RewriteDirectoryIndexFn/Resource": [
+          {
+            "type": "aws:cdk:logicalId",
+            "data": "RewriteDirectoryIndexFnA9EAF5F8"
           }
         ],
         "/RiftboundUiStack-dev/SiteDistribution/Resource": [

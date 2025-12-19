@@ -7,6 +7,7 @@ import {
   BATTLEFIELD_STATE_FIELDS,
   GAME_PROMPT_FIELDS,
   PRIORITY_WINDOW_FIELDS,
+  MATCHMAKING_STATUS_FIELDS,
 } from '@/lib/graphql/fragments';
 
 // ============================================================================
@@ -33,6 +34,10 @@ export const GAME_STATE_CHANGED = gql`
       currentPlayerIndex
       status
       timestamp
+      initiativeWinner
+      initiativeLoser
+      initiativeSelections
+      initiativeDecidedAt
       scoreLog {
         playerId
         amount
@@ -149,6 +154,15 @@ export const PHASE_CHANGED = gql`
       newPhase
       turnNumber
       timestamp
+    }
+  }
+`;
+
+export const MATCHMAKING_STATUS_UPDATED = gql`
+  ${MATCHMAKING_STATUS_FIELDS}
+  subscription MatchmakingStatusUpdated($userId: ID!, $mode: MatchMode!) {
+    matchmakingStatusUpdated(userId: $userId, mode: $mode) {
+      ...MatchmakingStatusFields
     }
   }
 `;

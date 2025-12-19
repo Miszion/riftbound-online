@@ -6,33 +6,53 @@ import { createClient } from 'graphql-ws';
 import { GRAPHQL_HTTP_URL, GRAPHQL_WS_URL } from '@/lib/apiConfig';
 import { networkActivity } from '@/lib/networkActivity';
 
+interface StoredSession {
+  userId?: string;
+  idToken?: string;
+}
+
+const STORAGE_KEY = 'riftbound:user';
+
+const getStoredSession = (): StoredSession | null => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  try {
+    const stored = window.localStorage.getItem(STORAGE_KEY);
+    return stored ? (JSON.parse(stored) as StoredSession) : null;
+  } catch {
+    return null;
+  }
+};
+
+const buildAuthHeaders = (session: StoredSession | null): Record<string, string> => {
+  if (!session?.idToken) {
+    return {};
+  }
+  const token = session.idToken;
+  return {
+    Authorization: `Bearer ${token}`,
+    'x-id-token': token,
+  };
+};
+
 const httpLink = new HttpLink({
   uri: GRAPHQL_HTTP_URL,
   credentials: 'include',
 });
 
 const authLink = setContext((_, { headers }) => {
-  if (typeof window === 'undefined') {
+  const session = getStoredSession();
+  const authHeaders = buildAuthHeaders(session);
+  if (!Object.keys(authHeaders).length) {
     return { headers };
   }
-  try {
-    const stored = window.localStorage.getItem('riftbound:user');
-    if (!stored) {
-      return { headers };
-    }
-    const session = JSON.parse(stored);
-    if (!session?.userId) {
-      return { headers };
-    }
-    return {
-      headers: {
-        ...headers,
-        'x-user-id': session.userId,
-      },
-    };
-  } catch {
-    return { headers };
-  }
+  return {
+    headers: {
+      ...headers,
+      ...authHeaders,
+    },
+  };
 });
 
 // Create WebSocket link for subscriptions
@@ -40,19 +60,8 @@ const wsLink = new GraphQLWsLink(
   createClient({
     url: GRAPHQL_WS_URL,
     connectionParams: () => {
-      if (typeof window === 'undefined') {
-        return {};
-      }
-      try {
-        const stored = window.localStorage.getItem('riftbound:user');
-        if (!stored) {
-          return {};
-        }
-        const session = JSON.parse(stored);
-        return session?.userId ? { 'x-user-id': session.userId } : {};
-      } catch {
-        return {};
-      }
+      const session = getStoredSession();
+      return buildAuthHeaders(session);
     },
   })
 );

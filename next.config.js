@@ -12,6 +12,14 @@ const nextConfig = {
       },
     ],
   },
+  async rewrites() {
+    return [
+      {
+        source: '/game/:matchId',
+        destination: '/game?matchId=:matchId',
+      },
+    ];
+  },
 };
 
 module.exports = nextConfig;
