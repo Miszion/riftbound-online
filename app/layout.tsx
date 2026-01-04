@@ -2,6 +2,8 @@ import type { Metadata } from 'next'
 import type { ReactNode } from 'react'
 import Providers from './providers'
 import '../styles/globals.css'
+import '../css/styles.css'
+import '../styles/game-board.css'
 import GlobalLoadingOverlay from '@/components/ui/GlobalLoadingOverlay'
 import ToastProvider from '@/components/ui/ToastProvider'
 

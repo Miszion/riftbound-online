@@ -105,7 +105,6 @@ const ACTION_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
 
 const TARGET_REGEX = /\btarget\b|\bchoose\b|\bselect\b/i;
 const ENRICHED_DATA_PATH = path.resolve(process.cwd(), 'data', 'cards.enriched.json');
-const RAW_DUMP_PATH = path.resolve(process.cwd(), 'champion-dump.json');
 
 const normalize = (value: unknown): string => {
   if (value === null || value === undefined) return '';
@@ -271,7 +270,7 @@ const reshapeDump = (raw: RawDump): EnrichedCardRecord[] => {
       },
       references: {
         marketUrl: normalize(record.cmurl) || null,
-        source: 'champion-dump.json'
+        source: 'champion-dump-api'
       }
     };
   });
@@ -295,17 +294,19 @@ const loadFromEnrichedFile = (): EnrichedCardRecord[] | null => {
   return null;
 };
 
-const loadFromChampionDump = (): EnrichedCardRecord[] => {
-  if (!fs.existsSync(RAW_DUMP_PATH)) {
-    throw new Error(`Unable to locate champion dump at ${RAW_DUMP_PATH}`);
+const requireEnrichedCatalog = (): EnrichedCardRecord[] => {
+  const enriched = loadFromEnrichedFile();
+  if (!enriched) {
+    throw new Error(
+      `Unable to load card catalog. Expected ${ENRICHED_DATA_PATH}. Run "npm run generate:cards" first.`
+    );
   }
-  const rawDump = JSON.parse(fs.readFileSync(RAW_DUMP_PATH, 'utf-8')) as RawDump;
-  return reshapeDump(rawDump);
+  return enriched;
 };
 
 const getCachedCatalog = (): EnrichedCardRecord[] => {
   if (!cachedCards) {
-    cachedCards = loadFromEnrichedFile() ?? loadFromChampionDump();
+    cachedCards = requireEnrichedCatalog();
   }
   return cachedCards;
 };

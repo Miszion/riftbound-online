@@ -87,6 +87,21 @@ export const GET_MATCH = gql`
       battlefields {
         ...BattlefieldStateFields
       }
+      duelLog {
+        id
+        message
+        tone
+        playerId
+        actorName
+        timestamp
+      }
+      chatLog {
+        id
+        playerId
+        playerName
+        message
+        timestamp
+      }
     }
   }
 `;
@@ -95,6 +110,7 @@ export const GET_PLAYER_MATCH = gql`
   ${CARD_STATE_FIELDS}
   ${PLAYER_STATE_FIELDS}
   ${PLAYER_BOARD_FIELDS}
+  ${CARD_SNAPSHOT_FIELDS}
   query GetPlayerMatch($matchId: ID!, $playerId: ID!) {
     playerMatch(matchId: $matchId, playerId: $playerId) {
       matchId
@@ -106,8 +122,15 @@ export const GET_PLAYER_MATCH = gql`
         victoryPoints
         victoryScore
         handSize
+        runeDeckSize
         board {
           ...PlayerBoardStateFields
+        }
+        championLegend {
+          ...CardSnapshotFields
+        }
+        championLeader {
+          ...CardSnapshotFields
         }
       }
       gameState {
@@ -360,12 +383,14 @@ export const PLAY_CARD = gql`
     $playerId: ID!
     $cardIndex: Int!
     $targets: [String!]
+    $destinationId: String
   ) {
     playCard(
       matchId: $matchId
       playerId: $playerId
       cardIndex: $cardIndex
       targets: $targets
+      destinationId: $destinationId
     ) {
       success
       gameState {
@@ -460,6 +485,77 @@ export const NEXT_PHASE = gql`
         turnNumber
         currentPlayerIndex
         status
+      }
+      currentPhase
+    }
+  }
+`;
+
+export const RECORD_DUEL_LOG_ENTRY = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
+  mutation RecordDuelLogEntry(
+    $matchId: ID!
+    $playerId: ID!
+    $message: String!
+    $tone: String
+    $entryId: ID
+    $actorName: String
+  ) {
+    recordDuelLogEntry(
+      matchId: $matchId
+      playerId: $playerId
+      message: $message
+      tone: $tone
+      entryId: $entryId
+      actorName: $actorName
+    ) {
+      success
+      gameState {
+        matchId
+        players {
+          ...PlayerStateFields
+        }
+        currentPhase
+        turnNumber
+        currentPlayerIndex
+        status
+        duelLog {
+          id
+          message
+          tone
+          playerId
+          actorName
+          timestamp
+        }
+      }
+      currentPhase
+    }
+  }
+`;
+
+export const SEND_CHAT_MESSAGE = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
+  mutation SendChatMessage($matchId: ID!, $playerId: ID!, $message: String!) {
+    sendChatMessage(matchId: $matchId, playerId: $playerId, message: $message) {
+      success
+      gameState {
+        matchId
+        players {
+          ...PlayerStateFields
+        }
+        currentPhase
+        turnNumber
+        currentPlayerIndex
+        status
+        chatLog {
+          id
+          playerId
+          playerName
+          message
+          timestamp
+        }
       }
       currentPhase
     }

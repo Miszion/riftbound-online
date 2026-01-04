@@ -6,6 +6,7 @@ import React, {
   useEffect,
   useCallback,
   useRef,
+  ReactNode,
 } from 'react';
 import Image, { StaticImageData } from 'next/image';
 import type { ApolloError } from '@apollo/client';
@@ -21,10 +22,18 @@ import {
   useSubmitMulligan,
   useSelectBattlefield,
   useSubmitInitiativeChoice,
+  useCardPlayedSubscription,
+  useAttackDeclaredSubscription,
+  usePhaseChangedSubscription,
+  useRecordDuelLogEntry,
+  useSendChatMessage,
 } from '@/hooks/useGraphQL';
+import type { ToastTone } from '@/components/ui/ToastStack';
+import useToasts from '@/hooks/useToasts';
 import doransBladeImg from '@/public/images/dorans-blade.jpg';
 import doransShieldImg from '@/public/images/dorans-shield.jpg';
 import doransRingImg from '@/public/images/dorans-ring.jpg';
+import cardBackImg from '@/public/images/card-back.png';
 
 type CardAsset = {
   remote?: string | null;
@@ -35,9 +44,11 @@ type BaseCard = {
   cardId?: string | null;
   instanceId?: string | null;
   name?: string | null;
+  slug?: string | null;
   type?: string | null;
   rarity?: string | null;
   cost?: number | null;
+  powerCost?: Record<string, number | null> | null;
   power?: number | null;
   toughness?: number | null;
   currentToughness?: number | null;
@@ -45,6 +56,7 @@ type BaseCard = {
   tags?: string[] | null;
   text?: string | null;
   isTapped?: boolean | null;
+  tapped?: boolean | null;
   assets?: CardAsset | null;
   location?: {
     zone: 'base' | 'battlefield';
@@ -60,6 +72,10 @@ type RuneState = {
   powerValue?: number | null;
   isTapped?: boolean | null;
   tapped?: boolean | null;
+  slug?: string | null;
+  assets?: CardAsset | null;
+  card?: CardSnapshotLike | BaseCard | null;
+  cardSnapshot?: CardSnapshotLike | null;
 };
 
 type PlayerBoardState = {
@@ -89,6 +105,15 @@ type PlayerStateData = {
     universalPower: number;
     power: Record<string, number | undefined>;
   };
+  championLegend?: CardSnapshotLike | null;
+  championLeader?: CardSnapshotLike | null;
+};
+
+type RecycledRuneEvent = {
+  id: string;
+  owner: 'self' | 'opponent';
+  rune: RuneState;
+  addedAt: number;
 };
 
 type OpponentSummary = {
@@ -99,6 +124,8 @@ type OpponentSummary = {
   deckCount?: number | null;
   runeDeckSize?: number | null;
   board?: PlayerBoardState | null;
+  championLegend?: CardSnapshotLike | null;
+  championLeader?: CardSnapshotLike | null;
 };
 
 type GameStateView = {
@@ -107,6 +134,265 @@ type GameStateView = {
   turnNumber: number;
   currentPlayerIndex: number;
   canAct: boolean;
+};
+
+type PlayerMatchView = {
+  matchId: string;
+  currentPlayer: PlayerStateData | null;
+  opponent?: OpponentSummary | null;
+  gameState?: GameStateView | null;
+};
+
+const normalizeDomainKey = (value?: string | null) => {
+  if (!value) {
+    return '';
+  }
+  return value
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+};
+
+const normalizePowerPool = (pool?: Record<string, number | undefined> | null) => {
+  const normalized: Record<string, number> = {};
+  if (!pool) {
+    return normalized;
+  }
+  Object.entries(pool).forEach(([domain, amount]) => {
+    const key = normalizeDomainKey(domain);
+    const numeric = resolvePositiveNumber(amount);
+    if (!key || numeric <= 0) {
+      return;
+    }
+    normalized[key] = (normalized[key] ?? 0) + numeric;
+  });
+  return normalized;
+};
+
+const normalizePowerCost = (cost?: Record<string, number | null> | null) => {
+  const normalized: Record<string, number> = {};
+  if (!cost) {
+    return normalized;
+  }
+  Object.entries(cost).forEach(([domain, amount]) => {
+    const key = normalizeDomainKey(domain);
+    const numeric = resolvePositiveNumber(amount);
+    if (!key || numeric <= 0) {
+      return;
+    }
+    normalized[key] = (normalized[key] ?? 0) + numeric;
+  });
+  return normalized;
+};
+
+const resolvePositiveNumber = (value: unknown) => {
+  const numeric = typeof value === 'number' ? value : Number(value ?? 0);
+  if (!Number.isFinite(numeric)) {
+    return 0;
+  }
+  return Math.max(0, numeric);
+};
+
+const isRuneExhausted = (rune: RuneState) => Boolean(rune.isTapped ?? rune.tapped);
+
+const STANDARD_RUNE_DOMAINS = new Set(['fury', 'calm', 'mind', 'body', 'chaos', 'order']);
+
+const resolveRunePowerValue = (rune?: RuneState | null) => Math.max(1, rune?.powerValue ?? 1);
+
+const isStandardDomainValue = (value?: string | null) => {
+  if (!value) {
+    return false;
+  }
+  const normalized = normalizeDomainKey(value);
+  return Boolean(normalized && STANDARD_RUNE_DOMAINS.has(normalized));
+};
+
+const isUniversalRune = (rune: RuneState) => !isStandardDomainValue(rune.domain);
+
+const runeInstanceKey = (rune: RuneState | undefined, index: number) => {
+  if (!rune) {
+    return null;
+  }
+  return (
+    rune.runeId ??
+    rune.card?.cardId ??
+    rune.cardSnapshot?.cardId ??
+    `${normalizeDomainKey(rune.domain) || 'rune'}-${index}`
+  );
+};
+
+type RunePaymentPlan = {
+  canPay: boolean;
+  runeIndices: number[];
+};
+
+const evaluateRunePayment = (
+  card?: BaseCard | null,
+  runes: RuneState[] = []
+): RunePaymentPlan => {
+  if (!card) {
+    return { canPay: false, runeIndices: [] };
+  }
+  const rawEnergyCost = typeof card.cost === 'number' ? card.cost : Number(card.cost ?? 0);
+  const energyRequirement = Number.isFinite(rawEnergyCost) ? Math.max(0, Math.ceil(rawEnergyCost)) : 0;
+  const availableEntries = runes.map((rune, index) => ({ rune, index }));
+  if (energyRequirement > availableEntries.length) {
+    return { canPay: false, runeIndices: [] };
+  }
+  const domainDemand = new Map<string, number>();
+  Object.entries(card.powerCost ?? {}).forEach(([domainKey, rawValue]) => {
+    const normalized = normalizeDomainKey(domainKey);
+    if (!normalized || !STANDARD_RUNE_DOMAINS.has(normalized)) {
+      return;
+    }
+    const numeric = Number(rawValue ?? 0);
+    const requirement = Number.isFinite(numeric) ? Math.max(0, Math.ceil(numeric)) : 0;
+    if (requirement > 0) {
+      domainDemand.set(normalized, requirement);
+    }
+  });
+  const reserved = new Set<number>();
+  const energySelections: { rune: RuneState; index: number }[] = [];
+  const powerAssigned = new Set<number>();
+
+  const claimEntry = (
+    predicate: (entry: { rune: RuneState; index: number }) => boolean,
+    options?: { allowExhausted?: boolean }
+  ): { rune: RuneState; index: number } | null => {
+    const allowExhausted = Boolean(options?.allowExhausted);
+    for (const entry of availableEntries) {
+      if (reserved.has(entry.index)) {
+        continue;
+      }
+      if (!allowExhausted && isRuneExhausted(entry.rune)) {
+        continue;
+      }
+      if (predicate(entry)) {
+        reserved.add(entry.index);
+        return entry;
+      }
+    }
+    return null;
+  };
+
+  const runeDomainDemand = (rune: RuneState) => {
+    const normalized = normalizeDomainKey(rune.domain);
+    if (!normalized) {
+      return 0;
+    }
+    return domainDemand.get(normalized) ?? 0;
+  };
+
+  const useEnergySelectionForPower = (domain: string) => {
+    for (const entry of energySelections) {
+      if (powerAssigned.has(entry.index)) {
+        continue;
+      }
+      if (
+        normalizeDomainKey(entry.rune.domain) === domain &&
+        resolveRunePowerValue(entry.rune) > 0
+      ) {
+        powerAssigned.add(entry.index);
+        return entry;
+      }
+    }
+    for (const entry of energySelections) {
+      if (powerAssigned.has(entry.index)) {
+        continue;
+      }
+      if (isUniversalRune(entry.rune) && resolveRunePowerValue(entry.rune) > 0) {
+        powerAssigned.add(entry.index);
+        return entry;
+      }
+    }
+    return null;
+  };
+
+  let energyRemaining = energyRequirement;
+  while (energyRemaining > 0) {
+    const selection =
+      claimEntry((entry) => isStandardDomainValue(entry.rune.domain) && runeDomainDemand(entry.rune) > 0) ??
+      claimEntry((entry) => isUniversalRune(entry.rune)) ??
+      claimEntry((_entry) => true);
+    if (!selection) {
+      return { canPay: false, runeIndices: [] };
+    }
+    energySelections.push(selection);
+    energyRemaining -= 1;
+  }
+
+  for (const [domainKey, requirement] of domainDemand.entries()) {
+    let remaining = requirement;
+    while (remaining > 0) {
+      let selection = useEnergySelectionForPower(domainKey);
+      if (!selection) {
+        selection = claimEntry(
+          (entry) =>
+            normalizeDomainKey(entry.rune.domain) === domainKey &&
+            resolveRunePowerValue(entry.rune) > 0,
+          { allowExhausted: true }
+        );
+        if (!selection) {
+          selection = claimEntry(
+            (entry) => isUniversalRune(entry.rune) && resolveRunePowerValue(entry.rune) > 0,
+            { allowExhausted: true }
+          );
+        }
+        if (!selection) {
+          return { canPay: false, runeIndices: [] };
+        }
+        energySelections.push(selection);
+        powerAssigned.add(selection.index);
+      }
+      remaining -= resolveRunePowerValue(selection.rune);
+    }
+  }
+
+  const runeIndices = Array.from(new Set(energySelections.map((entry) => entry.index)));
+  return { canPay: true, runeIndices };
+};
+
+const convertChampionSnapshot = (
+  snapshot?: CardSnapshotLike | null,
+  defaults: Partial<BaseCard> = {}
+): BaseCard | null => {
+  if (!snapshot) {
+    return null;
+  }
+  return snapshotToBaseCard(snapshot, defaults);
+};
+
+const parseTimestampMs = (value?: string | null) => {
+  if (!value) {
+    return 0;
+  }
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : 0;
+};
+
+const shouldApplySpectatorOverride = (
+  current: SpectatorGameState | undefined,
+  incoming: SpectatorGameState | null
+) => {
+  if (!incoming) {
+    return false;
+  }
+  if (!current) {
+    return true;
+  }
+  const currentRank = resolveStatusRank(current.status);
+  const nextRank = resolveStatusRank(incoming.status);
+  if (nextRank < currentRank) {
+    return false;
+  }
+  if (nextRank > currentRank) {
+    return true;
+  }
+  const currentTime = parseTimestampMs(current.updatedAt ?? current.timestamp);
+  const nextTime = parseTimestampMs(incoming.updatedAt ?? incoming.timestamp);
+  return nextTime >= currentTime;
 };
 
 type GamePrompt = {
@@ -136,6 +422,7 @@ type BattlefieldState = {
   contestedBy: string[];
   lastConqueredTurn?: number | null;
   lastHoldTurn?: number | null;
+  lastCombatTurn?: number | null;
   card?: CardSnapshotLike | BaseCard | null;
 };
 
@@ -158,14 +445,45 @@ type BattlefieldSelectionStatus = {
   card: BaseCard | null;
 };
 
-const INITIATIVE_RESULT_DELAY_MS = 3000;
+type DuelLogEntry = {
+  id: string;
+  message: string;
+  tone: ToastTone;
+  timestamp: string;
+  playerId?: string | null;
+  actorName?: string | null;
+  persisted?: boolean;
+};
+
+type ChatMessageEntry = {
+  id: string;
+  message: string;
+  playerId?: string | null;
+  playerName?: string | null;
+  timestamp: string;
+  optimistic?: boolean;
+};
+
+type NotifyOptions = {
+  banner?: boolean;
+  persist?: boolean;
+  persistKey?: string | null;
+  actorId?: string | null;
+  actorName?: string | null;
+  timestamp?: string | null;
+};
+
+const INITIATIVE_RESULT_DELAY_MS = 5000;
 const INITIATIVE_SYNC_INTERVAL_MS = 2000;
+const BATTLEFIELD_REVEAL_COUNTDOWN_SECONDS = 5;
 
 type SpectatorGameState = {
   matchId: string;
   status: string;
   currentPhase: string;
   turnNumber: number;
+  timestamp?: string | null;
+  updatedAt?: string | null;
   players: PlayerStateData[];
   prompts: GamePrompt[];
   priorityWindow?: PriorityWindow | null;
@@ -174,12 +492,16 @@ type SpectatorGameState = {
   initiativeLoser?: string | null;
   initiativeSelections?: Record<string, number | null> | null;
   initiativeDecidedAt?: string | null;
+  duelLog?: DuelLogEntry[];
+  chatLog?: ChatMessageEntry[];
 };
 
 interface GameBoardProps {
   matchId: string;
   playerId: string;
 }
+
+export default GameBoard;
 
 const RARITY_COLORS: Record<string, string> = {
   common: '#94a3b8',
@@ -188,6 +510,25 @@ const RARITY_COLORS: Record<string, string> = {
   legendary: '#f472b6',
   epic: '#c084fc',
   promo: '#22d3ee',
+};
+
+const GAME_STATUS_PRIORITY: Record<string, number> = {
+  waiting_for_players: 0,
+  setup: 1,
+  coin_flip: 2,
+  battlefield_selection: 3,
+  mulligan: 4,
+  in_progress: 5,
+  winner_determined: 6,
+  completed: 7,
+};
+
+const resolveStatusRank = (status?: string | null) => {
+  if (!status) {
+    return -1;
+  }
+  const normalized = status.toLowerCase();
+  return GAME_STATUS_PRIORITY[normalized] ?? -1;
 };
 
 const DOMAIN_COLORS: Record<string, string> = {
@@ -202,9 +543,66 @@ const DOMAIN_COLORS: Record<string, string> = {
   neutral: '#e2e8f0',
 };
 
-const MAX_RUNE_SLOTS = 12;
 const MATCH_INIT_RETRY_DELAY = 1500;
 const MATCH_INIT_MAX_RETRIES = 20;
+const ARENA_SYNC_INTERVAL_MS = 2500;
+const CARD_ART_CDN = 'https://static.dotgg.gg/riftbound/cards';
+const RUNE_RECYCLE_DURATION_MS = 2600;
+
+const normalizeTone = (value?: string | null): ToastTone => {
+  const tone = (value ?? '').toLowerCase();
+  if (tone === 'success' || tone === 'warning' || tone === 'error') {
+    return tone;
+  }
+  return 'info';
+};
+
+const slugifySegment = (value?: string | null) => {
+  if (!value) {
+    return null;
+  }
+  return value
+    .toString()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+};
+
+const normalizeSlugValue = (value?: string | null) => {
+  if (!value) {
+    return null;
+  }
+  return value.replace(/\.(png|jpe?g|webp)$/i, '').trim();
+};
+
+const deriveAssetSlug = (
+  card?: BaseCard | null,
+  fallbackId?: string | null,
+  fallbackName?: string | null
+) => {
+  if (card?.slug) {
+    return normalizeSlugValue(card.slug);
+  }
+  if (card?.cardId) {
+    return normalizeSlugValue(card.cardId);
+  }
+  if (fallbackId) {
+    return normalizeSlugValue(fallbackId);
+  }
+  const namePart = slugifySegment(card?.name ?? fallbackName);
+  return namePart ?? null;
+};
+
+const buildCardArtUrl = (slug?: string | null) => {
+  if (!slug) {
+    return null;
+  }
+  const normalizedSlug = normalizeSlugValue(slug);
+  if (!normalizedSlug) {
+    return null;
+  }
+  return `${CARD_ART_CDN}/${normalizedSlug}.webp`;
+};
 
 const INITIATIVE_OPTIONS: {
   value: number;
@@ -254,16 +652,27 @@ const friendlyStatus = (status?: string) => {
     .join(' ');
 };
 
-const getCardImage = (card?: BaseCard | null) => {
-  if (!card?.assets) {
+const getCardImage = (
+  card?: BaseCard | null,
+  options?: { fallbackId?: string | null; fallbackName?: string | null }
+) => {
+  if (!card) {
     return null;
   }
-  if (card.assets.remote) {
-    return card.assets.remote;
+  const assets = card.assets;
+  if (assets?.remote) {
+    return assets.remote;
   }
-  if (card.assets.localPath) {
-    const normalized = card.assets.localPath.replace(/^\/+/, '');
+  if (assets?.localPath) {
+    if (/^https?:\/\//i.test(assets.localPath)) {
+      return assets.localPath;
+    }
+    const normalized = assets.localPath.replace(/^\/+/, '');
     return `/${normalized}`;
+  }
+  const slug = deriveAssetSlug(card, options?.fallbackId, options?.fallbackName);
+  if (slug) {
+    return buildCardArtUrl(slug);
   }
   return null;
 };
@@ -283,19 +692,86 @@ const formatPowerPool = (pool?: Record<string, number | undefined>) => {
     .join(', ');
 };
 
-const getDomainColor = (domain?: string | null) => {
-  if (!domain) {
-    return '#475569';
+const runeSignature = (rune?: RuneState | null) => {
+  if (!rune) {
+    return 'unknown';
   }
-  return DOMAIN_COLORS[domain.toLowerCase()] ?? '#a5b4fc';
+  const snapshot = (rune.cardSnapshot ?? rune.card) as CardSnapshotLike | null;
+  const parts = [
+    rune.runeId ?? 'unknown',
+    rune.slug ?? snapshot?.slug ?? '',
+    rune.domain ?? '',
+    snapshot?.cardId ?? '',
+    snapshot && 'instanceId' in snapshot ? (snapshot as any)?.instanceId ?? '' : '',
+  ];
+  return parts.join('|');
 };
 
-const createRuneSlots = (runes: RuneState[] = []) => {
-  return Array.from({ length: MAX_RUNE_SLOTS }, (_, index) => runes[index] ?? null);
+const diffRuneCollections = (prev: RuneState[], next: RuneState[]) => {
+  if (prev === next) {
+    return [];
+  }
+  const nextCounts = new Map<string, number>();
+  next.forEach((rune) => {
+    const key = runeSignature(rune);
+    nextCounts.set(key, (nextCounts.get(key) ?? 0) + 1);
+  });
+  const removed: RuneState[] = [];
+  prev.forEach((rune) => {
+    const key = runeSignature(rune);
+    const current = nextCounts.get(key) ?? 0;
+    if (current > 0) {
+      nextCounts.set(key, current - 1);
+    } else {
+      removed.push(rune);
+    }
+  });
+  return removed;
 };
 
 const cardIdValue = (card?: BaseCard | null) =>
   card?.instanceId ?? card?.cardId ?? card?.name ?? '';
+
+const resolveHandCardKey = (card?: BaseCard | null, index?: number | null) => {
+  if (card?.instanceId) {
+    return `hand-${card.instanceId}`;
+  }
+  const baseId = cardIdValue(card) || 'card';
+  if (typeof index === 'number') {
+    return `hand-${baseId}-${index}`;
+  }
+  return `hand-${baseId}`;
+};
+
+const combineBoardCards = (...sections: (BaseCard[] | undefined)[]) => {
+  const combined: BaseCard[] = [];
+  const seen = new Set<string>();
+  sections.forEach((group) => {
+    group?.forEach((card) => {
+      const key = cardIdValue(card);
+      if (key && seen.has(key)) {
+        return;
+      }
+      if (key) {
+        seen.add(key);
+      }
+      combined.push(card);
+    });
+  });
+  return combined;
+};
+
+const cardMatchesMarker = (card: BaseCard, marker: string) => {
+  const normalized = marker.toLowerCase();
+  const listMatches = (list?: (string | null | undefined)[] | null) =>
+    list?.some((entry) => entry?.toLowerCase().includes(normalized)) ?? false;
+  return (
+    listMatches(card.tags) ||
+    listMatches(card.keywords) ||
+    (card.type?.toLowerCase().includes(normalized) ?? false) ||
+    (card.name?.toLowerCase().includes(normalized) ?? false)
+  );
+};
 
 const findCardWithTag = (
   cards: BaseCard[],
@@ -304,14 +780,10 @@ const findCardWithTag = (
 ) => {
   return cards.find((card) => {
     const id = cardIdValue(card);
-    if (exclude && id && exclude.has(id)) {
+    if (exclude && id && exclude.has(id ?? '')) {
       return false;
     }
-  return (
-      card.tags?.some((entry) =>
-        entry.toLowerCase().includes(tag.toLowerCase())
-      ) ?? false
-    );
+    return cardMatchesMarker(card, tag);
   });
 };
 
@@ -373,6 +845,9 @@ type CardSnapshotLike = {
   keywords?: string[] | null;
   effect?: string | null;
   assets?: CardAsset | null;
+  isTapped?: boolean | null;
+  tapped?: boolean | null;
+  location?: BaseCard['location'] | null;
 };
 
 const snapshotToBaseCard = (
@@ -382,11 +857,15 @@ const snapshotToBaseCard = (
   cardId: snapshot?.cardId ?? defaults.cardId ?? null,
   instanceId: defaults.instanceId ?? null,
   name: snapshot?.name ?? defaults.name ?? 'Unknown',
+  slug: snapshot?.slug ?? defaults.slug ?? null,
   type: snapshot?.type ?? defaults.type ?? 'BATTLEFIELD',
   rarity: snapshot?.rarity ?? defaults.rarity ?? undefined,
   keywords: snapshot?.keywords ?? defaults.keywords ?? undefined,
   text: snapshot?.effect ?? defaults.text ?? undefined,
+  isTapped: snapshot?.isTapped ?? defaults.isTapped ?? null,
+  tapped: snapshot?.tapped ?? defaults.tapped ?? null,
   assets: snapshot?.assets ?? defaults.assets ?? null,
+  location: snapshot?.location ?? defaults.location ?? null,
 });
 
 const EMPTY_PLAYER_STATE: PlayerStateData = {
@@ -424,6 +903,7 @@ interface CardTileProps {
   isSelected?: boolean;
   disabled?: boolean;
   compact?: boolean;
+  widthPx?: number;
 }
 
 const CardTile: React.FC<CardTileProps> = ({
@@ -434,13 +914,23 @@ const CardTile: React.FC<CardTileProps> = ({
   isSelected,
   disabled,
   compact,
+  widthPx,
 }) => {
   const image = getCardImage(card);
   const rarityColor =
     RARITY_COLORS[card?.rarity?.toLowerCase() ?? ''] ?? '#475569';
   const statsAvailable =
     card?.power !== undefined && card?.toughness !== undefined;
-  const isTapped = Boolean(card?.isTapped);
+  const isTapped = Boolean(card?.isTapped ?? card?.tapped);
+  const inlineStyle = useMemo<React.CSSProperties>(() => {
+    const style: React.CSSProperties = {
+      borderColor: rarityColor,
+    };
+    if (widthPx) {
+      style.width = `${widthPx}px`;
+    }
+    return style;
+  }, [rarityColor, widthPx]);
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (!onClick || disabled) {
@@ -465,20 +955,20 @@ const CardTile: React.FC<CardTileProps> = ({
       ]
         .filter(Boolean)
         .join(' ')}
-      style={{ borderColor: rarityColor }}
+      style={inlineStyle}
       onClick={disabled ? undefined : onClick}
       onKeyDown={handleKeyDown}
       role={onClick ? 'button' : undefined}
       tabIndex={onClick ? 0 : undefined}
     >
-      {image ? (
-        <div
-          className="card-image"
-          style={{ backgroundImage: `url(${image})` }}
-        />
-      ) : (
-        <div className="card-placeholder">
-          <span>{card?.name ?? 'Empty Slot'}</span>
+      {image && (
+        <div className="card-image">
+          <img
+            src={image}
+            alt={card?.name ?? label ?? 'Card art'}
+            loading="lazy"
+            draggable={false}
+          />
         </div>
       )}
       {label && <div className="card-label">{label}</div>}
@@ -494,57 +984,6 @@ const CardTile: React.FC<CardTileProps> = ({
   );
 };
 
-const RuneGrid = ({
-  title,
-  slots,
-  compact,
-}: {
-  title: string;
-  slots: (RuneState | null)[];
-  compact?: boolean;
-}) => (
-  <div className={`rune-section ${compact ? 'rune-section--compact' : ''}`}>
-    <div className="section-title">{title}</div>
-    <div className={`rune-grid ${compact ? 'rune-grid--compact' : ''}`}>
-      {slots.map((slot, index) => {
-        const runeClasses = [
-          'rune-cell',
-          slot ? 'filled' : '',
-          slot && (slot.isTapped ?? slot.tapped) ? 'rune-cell--tapped' : '',
-        ]
-          .filter(Boolean)
-          .join(' ');
-        return (
-          <div
-            key={`${title}-${index}`}
-            className={runeClasses}
-            style={
-              slot
-                ? {
-                    borderColor: getDomainColor(slot.domain),
-                    backgroundColor: 'rgba(255,255,255,0.04)',
-                  }
-                : undefined
-            }
-          >
-            {slot ? (
-              <>
-                <span className="rune-name">{slot.name}</span>
-                <span className="rune-domain">{slot.domain ?? '—'}</span>
-                <span className="rune-values">
-                  E:{slot.energyValue ?? 0} P:{slot.powerValue ?? 0}
-                </span>
-              </>
-            ) : (
-              <span className="rune-empty">Empty</span>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  </div>
-);
-
 const GraveyardPile = ({
   cards,
   compact,
@@ -552,23 +991,33 @@ const GraveyardPile = ({
   cards: BaseCard[];
   compact?: boolean;
 }) => {
-  const topCards = cards.slice(-3);
+  const topCard = cards[cards.length - 1] ?? null;
+  const total = cards.length;
+  const label = `Graveyard (${total})`;
+  const topArt = topCard ? getCardImage(topCard) : null;
+  const isEmpty = total === 0;
   return (
-    <div className={`graveyard-pile ${compact ? 'graveyard-pile--compact' : ''}`}>
-      <div className="section-title">Graveyard ({cards.length})</div>
-      <div className="graveyard-cards">
-        {topCards.length === 0 ? (
-          <div className="empty-slot">No cards</div>
+    <div className={`graveyard-stack ${compact ? 'graveyard-stack--compact' : ''}`}>
+      <div className="graveyard-stack__pile">
+        {topArt ? (
+          <img
+            src={topArt}
+            alt={topCard?.name ?? 'Top graveyard card'}
+            className="graveyard-stack__art"
+            width={125}
+            height={185}
+            draggable={false}
+          />
         ) : (
-          topCards.map((card) => (
-            <CardTile
-              key={cardIdValue(card)}
-              card={card}
-              compact
-            />
-          ))
+          <div className="graveyard-stack__empty">No cards</div>
+        )}
+        {!isEmpty && (
+          <span className="graveyard-stack__overlay-count">
+            {total} {total === 1 ? 'card' : 'cards'}
+          </span>
         )}
       </div>
+      <div className="section-title">{label}</div>
     </div>
   );
 };
@@ -588,28 +1037,30 @@ const DeckStack = ({
   drawAnimations,
   onAnimationComplete,
 }: DeckStackProps) => {
-  const visibleCards = Math.min(count, 5);
+  const displayCount = Math.max(count, 0);
   return (
     <div className="deck-stack" data-owner={owner}>
-      <div className="section-title">{label}</div>
       <div className="deck-stack__pile">
-        {visibleCards === 0 && <div className="empty-slot">No cards</div>}
-        {Array.from({ length: visibleCards }).map((_, index) => (
-          <div
-            key={`${label}-${index}`}
-            className="deck-card-back"
-            style={{ transform: `translateY(${index * 4}px)` }}
-          />
-        ))}
+        <Image
+          src={cardBackImg}
+          alt={label}
+          width={125}
+          height={185}
+          draggable={false}
+        />
+        <span className="deck-stack__overlay-count">
+          {displayCount} {displayCount === 1 ? 'card' : 'cards'}
+        </span>
         {drawAnimations.map((animation) => (
           <div
             key={animation.id}
             className={`card-draw-animation card-draw-animation--${owner}`}
             onAnimationEnd={() => onAnimationComplete(animation.id)}
+            style={{ backgroundImage: `url(${cardBackImg.src})` }}
           />
         ))}
       </div>
-      <div className="deck-count">{count} {count === 1 ? 'card' : 'cards'}</div>
+      <div className="section-title">{label}</div>
     </div>
   );
 };
@@ -632,9 +1083,7 @@ const BaseGrid = ({
   <div className="base-grid">
     <div className="section-title">{title}</div>
     <div className="card-row">
-      {cards.length === 0 ? (
-        <div className="empty-slot wide">Base is clear</div>
-      ) : (
+      {cards.length !== 0 && (
         cards.map((card) => {
           const instanceId = card.instanceId ?? undefined;
           const isSelected = Boolean(instanceId && selectedCardId === instanceId);
@@ -661,9 +1110,19 @@ type HandRowProps = {
   cards: BaseCard[];
   handSize: number;
   onCardClick?: (index: number) => void;
+  onCardDragStart?: (
+    index: number,
+    card: BaseCard,
+    event: React.DragEvent<HTMLDivElement>
+  ) => void;
+  onCardDragEnd?: () => void;
   mulliganSelection: number[];
   canInteract: boolean;
   idleLabel?: string;
+  controls?: ReactNode;
+  cardWidth?: number;
+  playableStates?: boolean[];
+  playingCardKeys?: Set<string>;
 };
 
 const HandRow = ({
@@ -671,17 +1130,20 @@ const HandRow = ({
   cards,
   handSize,
   onCardClick,
+  onCardDragStart,
+  onCardDragEnd,
   mulliganSelection,
   canInteract,
   idleLabel,
+  controls,
+  cardWidth = 125,
+  playableStates = [],
+  playingCardKeys,
 }: HandRowProps) => {
   const displayHand = isSelf ? cards : [];
   const placeholderCount = isSelf ? 0 : handSize;
   return (
-    <div className={`hand-row ${isSelf ? 'hand-row--self' : 'hand-row--opponent'}`}>
-      <div className="section-title">
-        Hand ({handSize})
-      </div>
+    <div className="hand-row__body">
       <div className={`hand-cards ${isSelf ? '' : 'hand-cards--opponent'}`}>
         {isSelf ? (
           displayHand.length === 0 ? (
@@ -689,16 +1151,33 @@ const HandRow = ({
           ) : (
             displayHand.map((card, index) => {
               const isSelected = mulliganSelection.includes(index);
+              const isPlayable = playableStates[index];
+              const cardKey = resolveHandCardKey(card, index);
+              const isPlaying = playingCardKeys?.has(cardKey) ?? false;
               return (
                 <div
-                  key={cardIdValue(card) || `hand-${index}`}
+                  key={cardKey}
                   className={[
                     'hand-card',
                     isSelected ? 'selected' : '',
                     canInteract ? 'hand-card--active' : '',
+                    isPlayable ? 'hand-card--playable' : '',
+                    isPlaying ? 'hand-card--playing' : '',
                   ]
                     .filter(Boolean)
                     .join(' ')}
+                  draggable={Boolean(canInteract && onCardClick)}
+                  onDragStart={(event) => {
+                    if (!canInteract || !onCardClick) {
+                      event.preventDefault();
+                      return;
+                    }
+                    event.dataTransfer.effectAllowed = 'move';
+                    onCardDragStart?.(index, card, event);
+                  }}
+                  onDragEnd={() => {
+                    onCardDragEnd?.();
+                  }}
                   onClick={
                     canInteract && onCardClick
                       ? () => onCardClick(index)
@@ -708,6 +1187,7 @@ const HandRow = ({
                   <CardTile
                     card={card}
                     compact
+                    widthPx={cardWidth}
                     selectable={canInteract}
                     isSelected={isSelected}
                   />
@@ -727,6 +1207,287 @@ const HandRow = ({
           )
         )}
       </div>
+      {controls ? <div className="hand-controls">{controls}</div> : null}
+    </div>
+  );
+};
+
+const resolveRuneCard = (rune: RuneState): BaseCard => {
+  const baseSnapshot = (rune.cardSnapshot ?? rune.card) as CardSnapshotLike | null;
+  return snapshotToBaseCard(baseSnapshot, {
+    cardId: rune.runeId,
+    name: rune.name ?? baseSnapshot?.name ?? 'Rune',
+    type: baseSnapshot?.type ?? 'Rune',
+    slug: rune.slug ?? baseSnapshot?.slug ?? undefined,
+    assets: rune.assets ?? baseSnapshot?.assets ?? null,
+  });
+};
+
+const resolveRuneArt = (rune: RuneState) => {
+  const card = resolveRuneCard(rune);
+  const slugSource =
+    rune.slug ??
+    card.slug ??
+    ((rune.card ?? rune.cardSnapshot) as CardSnapshotLike | null)?.slug ??
+    null;
+  const art = getCardImage(card) ?? (slugSource ? buildCardArtUrl(slugSource) : null);
+  return { card, art };
+};
+
+const RuneTokens = ({
+  runes,
+  optimisticTaps,
+}: {
+  runes: RuneState[];
+  optimisticTaps?: Set<string>;
+}) => {
+  if (!runes.length) {
+    return <div className="rune-token-strip rune-token-strip--empty" aria-hidden="true" />;
+  }
+  return (
+    <div className="rune-token-strip">
+      {runes.map((rune, index) => {
+        const { art } = resolveRuneArt(rune);
+        const instanceKey = runeInstanceKey(rune, index) ?? `${index}-${rune.runeId ?? rune.slug ?? 'rune'}`;
+        const exhausted =
+          Boolean(rune.isTapped ?? rune.tapped) || (instanceKey ? optimisticTaps?.has(instanceKey) : false);
+        const title = `${rune.name ?? 'Rune'} · ${rune.domain ?? 'Unknown'}`;
+        return (
+          <div
+            className={[
+              'rune-token',
+              exhausted ? 'rune-token--exhausted' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+            key={`${instanceKey}-${index}`}
+            style={{ zIndex: runes.length - index }}
+            title={title}
+          >
+            <div className="rune-token__art-wrapper">
+              {art ? (
+                <img
+                  src={art}
+                  alt={rune.name ?? 'Rune'}
+                  className="rune-token__art"
+                  width={110}
+                  height={160}
+                  draggable={false}
+                />
+              ) : (
+                <div className="rune-token__placeholder">
+                  <span>{rune.name ?? 'Rune'}</span>
+                  <small>{rune.domain ?? '—'}</small>
+                </div>
+              )}
+            </div>
+            <div className="rune-token__meta">
+              <span className="rune-token__name">{rune.name}</span>
+              <span className="rune-token__domain">
+                {rune.domain ?? '—'} · E{rune.energyValue ?? 0}/P{rune.powerValue ?? 0}
+              </span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+const RuneRecycleLayer = ({ events }: { events: RecycledRuneEvent[] }) => {
+  if (!events.length) {
+    return null;
+  }
+  return (
+    <div className="rune-recycle-layer" aria-hidden="true">
+      {events.map((event) => {
+        const { art } = resolveRuneArt(event.rune);
+        return (
+          <div key={event.id} className="rune-recycle-token">
+            <div className="rune-recycle-token__art-wrapper">
+              {art ? (
+                <img
+                  src={art}
+                  alt={event.rune.name ?? 'Rune'}
+                  className="rune-recycle-token__art"
+                  width={110}
+                  height={160}
+                />
+              ) : (
+                <div className="rune-token__placeholder">
+                  <span>{event.rune.name ?? 'Rune'}</span>
+                  <small>{event.rune.domain ?? '—'}</small>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+const CardBackStack = ({
+  label,
+  count,
+  inline,
+}: {
+  label: string;
+  count: number;
+  inline?: boolean;
+}) => {
+  const displayCount = Math.max(count, 0);
+  return (
+    <div
+      className={['card-back-stack', inline ? 'card-back-stack--inline' : '']
+        .filter(Boolean)
+        .join(' ')}
+    >
+      <div className="card-back-stack__image">
+        <Image
+          src={cardBackImg}
+          alt={label}
+          width={125}
+          height={185}
+          draggable={false}
+        />
+        <span className="card-back-stack__count">{displayCount} cards</span>
+      </div>
+      <div className="card-back-stack__label section-title">{label}</div>
+    </div>
+  );
+};
+
+const HiddenHand = ({ count }: { count: number }) => {
+  const displayCount = Math.max(count, 4);
+  return (
+      <div className="hidden-hand__cards">
+        {Array.from({ length: displayCount }).map((_, index) => (
+          <Image
+            key={`hidden-hand-${index}`}
+            src={cardBackImg}
+            alt="Hidden card"
+            width={125}
+            height={185}
+            draggable={false}
+            className="hidden-hand__card"
+          />
+        ))}
+      </div>
+  );
+};
+
+type MulliganModalProps = {
+  cards: BaseCard[];
+  selection: number[];
+  limit: number;
+  loading: boolean;
+  waitingMessage?: string | null;
+  onToggle: (index: number) => void;
+  onConfirm: () => void;
+  onSkip: () => void;
+};
+
+const MulliganModal = ({
+  cards,
+  selection,
+  limit,
+  loading,
+  onToggle,
+  onConfirm,
+  onSkip,
+  waitingMessage,
+}: MulliganModalProps) => (
+  <div className="modal-backdrop">
+    <div className="mulligan-modal" role="dialog" aria-modal="true">
+      <h3>Mulligan</h3>
+      {waitingMessage ? (
+        <div className="mulligan-waiting" role="status">
+          <span className="phase-spinner" aria-hidden="true" />
+          <p>{waitingMessage}</p>
+        </div>
+      ) : (
+        <>
+          <p>Select up to {limit} card{limit === 1 ? '' : 's'} to replace.</p>
+          <p className="mulligan-count">
+            Selected {selection.length} / {limit}
+            {selection.length === limit ? ' · Ready to submit' : ''}
+          </p>
+          <div className="mulligan-card-grid">
+            {cards.map((card, index) => {
+              const isSelected = selection.includes(index);
+              const disabled = loading;
+              const handleClick = () => {
+                if (disabled) {
+                  return;
+                }
+                onToggle(index);
+              };
+              return (
+                <div
+                  key={resolveHandCardKey(card, index)}
+                  className={[
+                    'mulligan-card-button',
+                    isSelected ? 'mulligan-card-button--selected' : '',
+                    disabled ? 'mulligan-card-button--disabled' : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  onClick={handleClick}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      handleClick();
+                    }
+                  }}
+                >
+                  <CardTile card={card} compact widthPx={125} isSelected={isSelected} />
+                </div>
+              );
+            })}
+          </div>
+          <div className="mulligan-actions">
+            <button
+              type="button"
+              className="prompt-button secondary"
+              onClick={onSkip}
+              disabled={loading}
+            >
+              No Mulligan
+            </button>
+            <button
+              type="button"
+              className="prompt-button primary mulligan-button"
+              onClick={onConfirm}
+              disabled={loading}
+            >
+              {loading ? 'Submitting…' : 'Confirm Selection'}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  </div>
+);
+
+const AnnouncementModal = ({
+  message,
+  onClose,
+}: {
+  message: string;
+  onClose: () => void;
+}) => {
+  useEffect(() => {
+    const timer = setTimeout(onClose, 3500);
+    return () => clearTimeout(timer);
+  }, [onClose]);
+  return (
+    <div className="announcement-modal">
+      <div className="announcement-card">
+        <p>{message}</p>
+      </div>
     </div>
   );
 };
@@ -736,71 +1497,7 @@ type BattlefieldChoice = {
   label: string;
   description?: string;
   card: BaseCard;
-};
-
-const BoardGrid = ({
-  board,
-  excludeIds,
-  compact,
-  onCardSelect,
-  selectableFilter,
-  selectedCardId,
-}: {
-  board?: PlayerBoardState | null;
-  excludeIds?: Set<string>;
-  compact?: boolean;
-  onCardSelect?: (card: BaseCard) => void;
-  selectableFilter?: (card: BaseCard) => boolean;
-  selectedCardId?: string | null;
-}) => {
-  const sections = [
-    { label: 'Units', cards: board?.creatures ?? [] },
-    { label: 'Gear', cards: board?.artifacts ?? [] },
-    { label: 'Enchantments', cards: board?.enchantments ?? [] },
-  ];
-  return (
-    <div className="board-columns">
-      {sections.map((section) => {
-        const visibleCards = section.cards.filter((card) => {
-          const id = cardIdValue(card);
-          return !excludeIds?.has(id);
-        });
-        return (
-          <div className="board-column" key={section.label}>
-            <div className="column-title">{section.label}</div>
-            <div className="card-row">
-              {visibleCards.length === 0 ? (
-                <div className="empty-slot">Empty</div>
-              ) : (
-                visibleCards.map((card) => {
-                  const selectable =
-                    Boolean(onCardSelect) &&
-                    (!selectableFilter || selectableFilter(card));
-                  const instanceId = card.instanceId ?? undefined;
-                  return (
-                    <CardTile
-                      key={cardIdValue(card)}
-                      card={card}
-                      compact={compact}
-                      selectable={selectable}
-                      isSelected={
-                        Boolean(instanceId) && selectedCardId === instanceId
-                      }
-                      onClick={
-                        selectable && onCardSelect
-                          ? () => onCardSelect(card)
-                          : undefined
-                      }
-                    />
-                  );
-                })
-              )}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
+  art?: string | null;
 };
 
 const isMatchNotFoundError = (error?: ApolloError | null) => {
@@ -835,6 +1532,9 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     playerId
   );
   const { data: spectatorSubData } = useGameStateSubscription(matchId);
+  const { data: cardPlayedData } = useCardPlayedSubscription(matchId);
+  const { data: attackDeclaredData } = useAttackDeclaredSubscription(matchId);
+  const { data: phaseChangedData } = usePhaseChangedSubscription(matchId);
 
   const [playCard, { loading: playingCard }] = usePlayCard();
   const [moveUnit, { loading: movingUnit }] = useMoveUnit();
@@ -848,10 +1548,171 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     submitInitiativeChoice,
     { loading: submittingInitiativeChoice },
   ] = useSubmitInitiativeChoice();
+  const [recordDuelLogEntryMutation] = useRecordDuelLogEntry();
+  const [sendChatMessageMutation] = useSendChatMessage();
 
+  const [playerOverride, setPlayerOverride] = useState<PlayerMatchView | null>(null);
+  const [spectatorOverride, setSpectatorOverride] = useState<SpectatorGameState | null>(null);
+  const [battlefieldCountdown, setBattlefieldCountdown] = useState<number | null>(null);
+  const [battlefieldAdvanceTriggered, setBattlefieldAdvanceTriggered] = useState(false);
+  const [battlefieldAdvanceComplete, setBattlefieldAdvanceComplete] = useState(false);
+  useEffect(() => {
+    setBattlefieldCountdown(null);
+    setBattlefieldAdvanceTriggered(false);
+    setBattlefieldAdvanceComplete(false);
+    runeCountRefs.current = { self: 0, opponent: 0 };
+    runeInitRefs.current = { self: false, opponent: false };
+    setOptimisticRuneTaps(new Set());
+    Object.values(runeTapTimeouts.current).forEach((timeout) => clearTimeout(timeout));
+    runeTapTimeouts.current = {};
+  }, [matchId]);
   const [mulliganSelection, setMulliganSelection] = useState<number[]>([]);
   const [selectedUnit, setSelectedUnit] = useState<string | null>(null);
+  const [pendingDeployment, setPendingDeployment] = useState<number | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [sawMulliganPhase, setSawMulliganPhase] = useState(false);
+  const [mulliganCompleteNotified, setMulliganCompleteNotified] = useState(false);
+  const { pushToast } = useToasts();
+  const [duelLog, setDuelLog] = useState<DuelLogEntry[]>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMessageEntry[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [draggingHandIndex, setDraggingHandIndex] = useState<number | null>(null);
+  const [draggingCardKey, setDraggingCardKey] = useState<string | null>(null);
+  const [boardDragHover, setBoardDragHover] = useState(false);
+  const [handPlayAnimations, setHandPlayAnimations] = useState<Set<string>>(new Set());
+  const handAnimationTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const [optimisticRuneTaps, setOptimisticRuneTaps] = useState<Set<string>>(new Set());
+  const runeTapTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const duelLogCounter = useRef(0);
+  const autoMulliganRef = useRef(false);
+  const selfZoneRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    return () => {
+      Object.values(handAnimationTimeouts.current).forEach((timeout) => clearTimeout(timeout));
+      handAnimationTimeouts.current = {};
+      Object.values(runeTapTimeouts.current).forEach((timeout) => clearTimeout(timeout));
+      runeTapTimeouts.current = {};
+    };
+  }, []);
+  const appendLog = useCallback(
+    (
+      message: string,
+      tone: ToastTone = 'info',
+      metadata?: {
+        id?: string | null;
+        playerId?: string | null;
+        actorName?: string | null;
+        timestamp?: string | null;
+        persisted?: boolean;
+      }
+    ) => {
+      setDuelLog((prev) => {
+        const entry: DuelLogEntry = {
+          id: metadata?.id ?? `${Date.now()}-${duelLogCounter.current++}`,
+          message,
+          tone,
+          timestamp: metadata?.timestamp ?? new Date().toISOString(),
+          playerId: metadata?.playerId ?? null,
+          actorName: metadata?.actorName ?? null,
+          persisted: metadata?.persisted ?? false,
+        };
+        const next = [entry, ...prev.filter((existing) => existing.id !== entry.id)];
+        return next.slice(0, 200);
+      });
+    },
+    []
+  );
+  const persistDuelLogEntry = useCallback(
+    async ({
+      id,
+      message,
+      tone,
+      playerId: actorId,
+      actorName,
+    }: {
+      id: string;
+      message: string;
+      tone: ToastTone;
+      playerId?: string | null;
+      actorName?: string | null;
+    }) => {
+      if (!matchId || !id) {
+        return;
+      }
+      try {
+        await recordDuelLogEntryMutation({
+          variables: {
+            matchId,
+            playerId: actorId ?? playerId,
+            message,
+            tone,
+            entryId: id,
+            actorName: actorName ?? undefined,
+          },
+          context: { skipNetworkActivity: true },
+        });
+      } catch (error) {
+        console.warn('Failed to persist duel log entry', error);
+      }
+    },
+    [matchId, playerId, recordDuelLogEntryMutation]
+  );
+  const notify = useCallback(
+    (message: string, tone: ToastTone = 'info', options?: NotifyOptions) => {
+      pushToast(message, tone);
+      appendLog(message, tone, {
+        id: options?.persistKey ?? undefined,
+        playerId: options?.actorId ?? null,
+        actorName: options?.actorName ?? null,
+        timestamp: options?.timestamp ?? undefined,
+        persisted: Boolean(options?.persistKey),
+      });
+      if (options?.banner) {
+        setActionMessage(message);
+      }
+      if (options?.persist && options?.persistKey) {
+        persistDuelLogEntry({
+          id: options.persistKey,
+          message,
+          tone,
+          playerId: options.actorId ?? null,
+          actorName: options.actorName ?? undefined,
+        });
+      }
+    },
+    [appendLog, persistDuelLogEntry, pushToast, setActionMessage]
+  );
+  const triggerHandAnimation = useCallback((key?: string | null) => {
+    if (!key) {
+      return;
+    }
+    setHandPlayAnimations((prev) => {
+      if (prev.has(key)) {
+        return prev;
+      }
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+    const pendingTimeout = handAnimationTimeouts.current[key];
+    if (pendingTimeout) {
+      clearTimeout(pendingTimeout);
+    }
+    handAnimationTimeouts.current[key] = setTimeout(() => {
+      setHandPlayAnimations((prev) => {
+        if (!prev.has(key)) {
+          return prev;
+        }
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+      delete handAnimationTimeouts.current[key];
+    }, 420);
+  }, []);
+  const runeCountRefs = useRef({ self: 0, opponent: 0 });
+  const runeInitRefs = useRef({ self: false, opponent: false });
+  const lastTurnHolderRef = useRef<string | null>(null);
   const [matchInitRetries, setMatchInitRetries] = useState(0);
   const [playerDeckOrder, setPlayerDeckOrder] = useState<string[]>([]);
   const [opponentDeckOrder, setOpponentDeckOrder] = useState<string[]>([]);
@@ -859,6 +1720,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const previousPlayerDeckCount = useRef(0);
   const previousOpponentDeckCount = useRef(0);
   const matchSeedRef = useRef<string | null>(null);
+  const refreshInFlightRef = useRef<Promise<void> | null>(null);
   const [initiativeRevealActive, setInitiativeRevealActive] = useState(false);
   const [pendingInitiativeChoice, setPendingInitiativeChoice] = useState<number | null>(null);
   const [tieMessage, setTieMessage] = useState<string | null>(null);
@@ -893,10 +1755,62 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     [drawQueue]
   );
 
+  const latestPlayerView =
+    playerOverride ??
+    playerSubData?.playerGameStateChanged ??
+    basePlayerData?.playerMatch;
+  const latestSpectatorState =
+    spectatorOverride ??
+    spectatorSubData?.gameStateChanged ??
+    baseSpectatorData?.match;
+  const [playerSnapshot, setPlayerSnapshot] = useState<PlayerMatchView | null>(null);
+  const [spectatorSnapshot, setSpectatorSnapshot] = useState<SpectatorGameState | null>(null);
+  useEffect(() => {
+    if (latestPlayerView) {
+      setPlayerSnapshot(latestPlayerView);
+    }
+  }, [latestPlayerView]);
+  useEffect(() => {
+    if (latestSpectatorState) {
+      setSpectatorSnapshot(latestSpectatorState);
+    }
+  }, [latestSpectatorState]);
   const playerView =
-    playerSubData?.playerGameStateChanged ?? basePlayerData?.playerMatch;
+    latestPlayerView ??
+    playerSnapshot ??
+    null;
   const spectatorState: SpectatorGameState | undefined =
-    spectatorSubData?.gameStateChanged ?? baseSpectatorData?.match;
+    latestSpectatorState ??
+    spectatorSnapshot ??
+    undefined;
+  const refreshArenaState = useCallback(async () => {
+    if (refreshInFlightRef.current) {
+      return refreshInFlightRef.current;
+    }
+    const refreshPromise = (async () => {
+      try {
+        const result = await refetchMatch();
+        const nextState = (result.data?.match ?? null) as SpectatorGameState | null;
+        if (shouldApplySpectatorOverride(spectatorState, nextState)) {
+          setSpectatorOverride(nextState);
+        }
+      } catch (error) {
+        console.error('Failed to refresh match snapshot', error);
+      }
+      try {
+        const playerResult = await refetchPlayerMatch();
+        if (playerResult.data?.playerMatch) {
+          setPlayerOverride(playerResult.data.playerMatch as PlayerMatchView);
+        }
+      } catch (error) {
+        console.error('Failed to refresh player snapshot', error);
+      }
+    })();
+    refreshInFlightRef.current = refreshPromise.finally(() => {
+      refreshInFlightRef.current = null;
+    });
+    return refreshInFlightRef.current;
+  }, [refetchMatch, refetchPlayerMatch, spectatorState]);
   const rawCurrentPlayer = (playerView?.currentPlayer ?? null) as
     | PlayerStateData
     | null;
@@ -931,6 +1845,79 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     return lookup;
   }, [spectatorPlayers]);
   const selfDisplayName = currentPlayer?.name ?? spectatorSelf?.name ?? null;
+  const syncChatMessages = useCallback(
+    (serverChat?: (ChatMessageEntry | null)[] | null) => {
+      if (!serverChat) {
+        return;
+      }
+      setChatMessages((prev) => {
+        const merged = new Map<string, ChatMessageEntry>();
+        serverChat.forEach((entry) => {
+          if (!entry?.id) {
+            return;
+          }
+          merged.set(entry.id, {
+            id: entry.id,
+            message: entry.message ?? '',
+            playerId: entry.playerId ?? null,
+            playerName: entry.playerName ?? null,
+            timestamp: entry.timestamp ?? new Date().toISOString(),
+            optimistic: false,
+          });
+        });
+        prev.forEach((entry) => {
+          if (!entry.id) {
+            return;
+          }
+          if (!merged.has(entry.id)) {
+            merged.set(entry.id, entry);
+          }
+        });
+        return Array.from(merged.values()).sort(
+          (a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp)
+        );
+      });
+    },
+    []
+  );
+  useEffect(() => {
+    const serverLog = spectatorState?.duelLog ?? null;
+    if (!serverLog) {
+      return;
+    }
+    setDuelLog((prev) => {
+      const merged = new Map<string, DuelLogEntry>();
+      serverLog.forEach((entry) => {
+        if (!entry?.id) {
+          return;
+        }
+        merged.set(entry.id, {
+          id: entry.id,
+          message: entry.message,
+          tone: normalizeTone(entry.tone),
+          timestamp: entry.timestamp ?? new Date().toISOString(),
+          playerId: entry.playerId ?? null,
+          actorName: entry.actorName ?? null,
+          persisted: true,
+        });
+      });
+      prev.forEach((entry) => {
+        if (!entry.persisted || !merged.has(entry.id)) {
+          merged.set(entry.id, entry);
+        }
+      });
+      return Array.from(merged.values()).sort(
+        (a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)
+      );
+    });
+  }, [spectatorState?.duelLog]);
+  useEffect(() => {
+    const serverChat = spectatorState?.chatLog ?? null;
+    if (!serverChat) {
+      return;
+    }
+    syncChatMessages(serverChat);
+  }, [spectatorState?.chatLog, syncChatMessages]);
   const resolvePlayerLabel = useCallback(
     (id?: string | null, fallback = 'Unknown duelist') => {
       if (!id) {
@@ -999,6 +1986,40 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   }, [matchId, playerDeckCount, opponentDeckCount]);
 
   useEffect(() => {
+    if (!matchId) {
+      return;
+    }
+    const syncInterval = setInterval(() => {
+      void refreshArenaState();
+    }, ARENA_SYNC_INTERVAL_MS);
+    return () => clearInterval(syncInterval);
+  }, [matchId, refreshArenaState]);
+
+  useEffect(() => {
+    setPlayerOverride(null);
+    setSpectatorOverride(null);
+  }, [matchId]);
+  useEffect(() => {
+    setPlayerSnapshot(null);
+    setSpectatorSnapshot(null);
+    refreshInFlightRef.current = null;
+  }, [matchId]);
+
+  useEffect(() => {
+    if (playerSubData?.playerGameStateChanged) {
+      setPlayerOverride(null);
+      void refreshArenaState();
+    }
+  }, [playerSubData?.playerGameStateChanged, refreshArenaState]);
+
+  useEffect(() => {
+    if (spectatorSubData?.gameStateChanged) {
+      setSpectatorOverride(null);
+      void refreshArenaState();
+    }
+  }, [refreshArenaState, spectatorSubData?.gameStateChanged]);
+
+  useEffect(() => {
     setPlayerDeckOrder((prev) => alignDeckOrder(prev, playerDeckCount, `self-${matchId}`));
   }, [playerDeckCount, matchId]);
 
@@ -1024,6 +2045,73 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     previousOpponentDeckCount.current = opponentDeckCount;
   }, [opponentDeckCount, queueDrawAnimations]);
 
+  const cardPlayedEvent = cardPlayedData?.cardPlayed ?? null;
+  useEffect(() => {
+    if (!cardPlayedEvent) {
+      return;
+    }
+    const actor = resolvePlayerLabel(cardPlayedEvent.playerId, 'A duelist');
+    const cardName = cardPlayedEvent.card?.name ?? 'a card';
+    const persistKey = [
+      'card',
+      cardPlayedEvent.timestamp,
+      cardPlayedEvent.playerId,
+      cardPlayedEvent.card?.cardId ?? cardPlayedEvent.card?.name ?? ''
+    ]
+      .filter(Boolean)
+      .join(':');
+    notify(`${actor} played ${cardName}.`, 'info', {
+      persist: true,
+      persistKey,
+      actorId: cardPlayedEvent.playerId,
+      actorName: actor,
+      timestamp: cardPlayedEvent.timestamp,
+    });
+  }, [cardPlayedEvent, notify, resolvePlayerLabel]);
+
+  const attackDeclaredEvent = attackDeclaredData?.attackDeclared ?? null;
+  useEffect(() => {
+    if (!attackDeclaredEvent) {
+      return;
+    }
+    const actor = resolvePlayerLabel(attackDeclaredEvent.playerId, 'A duelist');
+    const destinationLabel =
+      attackDeclaredEvent.destinationId === 'base' ? 'the base' : 'a battlefield';
+    const persistKey = [
+      'attack',
+      attackDeclaredEvent.timestamp,
+      attackDeclaredEvent.playerId,
+      attackDeclaredEvent.creatureInstanceId,
+      attackDeclaredEvent.destinationId
+    ]
+      .filter(Boolean)
+      .join(':');
+    notify(`${actor} launched an attack on ${destinationLabel}.`, 'warning', {
+      persist: true,
+      persistKey,
+      actorId: attackDeclaredEvent.playerId,
+      actorName: actor,
+      timestamp: attackDeclaredEvent.timestamp,
+    });
+  }, [attackDeclaredEvent, notify, resolvePlayerLabel]);
+
+  const phaseChangedEvent = phaseChangedData?.phaseChanged ?? null;
+  useEffect(() => {
+    if (!phaseChangedEvent) {
+      return;
+    }
+    const phaseLabel = friendlyStatus(phaseChangedEvent.newPhase);
+    const persistKey = ['phase', phaseChangedEvent.timestamp, phaseChangedEvent.newPhase]
+      .filter(Boolean)
+      .join(':');
+    notify(`Turn ${phaseChangedEvent.turnNumber}: ${phaseLabel} phase`, 'info', {
+      persist: true,
+      persistKey,
+      actorId: null,
+      timestamp: phaseChangedEvent.timestamp,
+    });
+  }, [friendlyStatus, notify, phaseChangedEvent]);
+
   const prompts = spectatorState?.prompts ?? [];
   const myPrompts = prompts.filter(
     (prompt) => prompt.playerId === playerId && !prompt.resolved
@@ -1036,6 +2124,23 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   );
   const mulliganPrompt = myPrompts.find(
     (prompt) => prompt.type === 'mulligan'
+  );
+  const mulliganLimit =
+    typeof mulliganPrompt?.data?.maxReplacements === 'number'
+      ? mulliganPrompt.data.maxReplacements
+      : 2;
+  const unresolvedMulliganPrompts = useMemo(
+    () => prompts.filter((prompt) => prompt.type === 'mulligan' && !prompt.resolved),
+    [prompts]
+  );
+  const playerMulliganPending = Boolean(mulliganPrompt);
+  const opponentMulliganPending = useMemo(
+    () =>
+      Boolean(
+        opponentPlayerId &&
+          unresolvedMulliganPrompts.some((prompt) => prompt.playerId === opponentPlayerId)
+      ),
+    [opponentPlayerId, unresolvedMulliganPrompts]
   );
 
   const battlefieldPrompts = useMemo(
@@ -1099,13 +2204,20 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const opponentSelectionChoice = opponentPlayerId
     ? selectionLookup[opponentPlayerId] ?? null
     : null;
-  const highlightedChoice = playerSelectionChoice ?? pendingInitiativeChoice;
+  const highlightedChoice = pendingInitiativeChoice ?? playerSelectionChoice ?? null;
+  const playerDisplayedChoice = playerSelectionChoice ?? pendingInitiativeChoice ?? null;
   const playerChoiceMeta =
-    highlightedChoice != null
-      ? INITIATIVE_OPTIONS.find((option) => option.value === highlightedChoice) ?? null
+    playerDisplayedChoice != null
+      ? INITIATIVE_OPTIONS.find((option) => option.value === playerDisplayedChoice) ?? null
       : null;
+  const bothInitiativeSelectionsSubmitted =
+    playerSelectionChoice != null && opponentSelectionChoice != null;
+  const canRevealOpponentChoice =
+    bothInitiativeSelectionsSubmitted || Boolean(spectatorState?.initiativeWinner);
+  const awaitingOpponentSelection =
+    !canRevealOpponentChoice && Boolean(playerDisplayedChoice);
   const opponentChoiceMeta =
-    opponentSelectionChoice != null
+    canRevealOpponentChoice && opponentSelectionChoice != null
       ? INITIATIVE_OPTIONS.find((option) => option.value === opponentSelectionChoice) ?? null
       : null;
 
@@ -1114,6 +2226,29 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       setMulliganSelection([]);
     }
   }, [mulliganPrompt?.id]);
+
+  useEffect(() => {
+    setSawMulliganPhase(false);
+    setMulliganCompleteNotified(false);
+  }, [matchId]);
+
+  useEffect(() => {
+    if (!sawMulliganPhase && prompts.some((prompt) => prompt.type === 'mulligan')) {
+      setSawMulliganPhase(true);
+    }
+  }, [prompts, sawMulliganPhase]);
+
+  useEffect(() => {
+    const mulliganStillPending = prompts.some(
+      (prompt) => prompt.type === 'mulligan' && !prompt.resolved
+    );
+    if (sawMulliganPhase && !mulliganStillPending && !mulliganCompleteNotified) {
+      notify('Mulligan phase completed', 'success', { banner: true });
+      setMulliganCompleteNotified(true);
+    } else if (mulliganStillPending && mulliganCompleteNotified) {
+      setMulliganCompleteNotified(false);
+    }
+  }, [mulliganCompleteNotified, notify, prompts, sawMulliganPhase]);
 
   useEffect(() => {
     if (selectedUnit && !selectedUnitCard) {
@@ -1149,32 +2284,81 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         selectedUnitCard.location.zone === 'battlefield'
     );
 
-  const [legendCard, leaderCard, exclusionSet] = useMemo(() => {
-    const legend = findCardWithTag(playerCreatures, 'legend');
-    const leaderExcludeSet = buildExcludeSet(legend);
-    const leader = findCardWithTag(playerCreatures, 'leader', leaderExcludeSet);
-    return [legend, leader, buildExcludeSet(legend, leader)];
-  }, [playerCreatures]);
+  const [legendCard, leaderCard] = useMemo(() => {
+    const snapshotLegend = convertChampionSnapshot(rawCurrentPlayer?.championLegend, {
+      type: 'CREATURE',
+    });
+    const legend = snapshotLegend ?? findCardWithTag(playerCreatures, 'legend');
+    const leaderExcludeSet = buildExcludeSet(legend ?? undefined);
+    const snapshotLeader = convertChampionSnapshot(rawCurrentPlayer?.championLeader, {
+      type: 'CREATURE',
+    });
+    const leader = snapshotLeader ?? findCardWithTag(playerCreatures, 'leader', leaderExcludeSet);
+    return [legend, leader];
+  }, [playerCreatures, rawCurrentPlayer?.championLeader, rawCurrentPlayer?.championLegend]);
 
-  const [opponentLegend, opponentLeader, opponentExclude] = useMemo(() => {
-    const opponentCreatures = spectatorOpponent?.board?.creatures ?? [];
-    const legend = findCardWithTag(opponentCreatures, 'legend');
-    const leaderExcludeSet = buildExcludeSet(legend);
-    const leader = findCardWithTag(opponentCreatures, 'leader', leaderExcludeSet);
-    return [legend, leader, buildExcludeSet(legend, leader)];
-  }, [spectatorOpponent?.board?.creatures]);
+  const [opponentLegend, opponentLeader] = useMemo(() => {
+    const opponentCreatures =
+      spectatorOpponent?.board?.creatures ?? playerView?.opponent?.board?.creatures ?? [];
+    const snapshotLegend = convertChampionSnapshot(
+      spectatorOpponent?.championLegend ?? playerView?.opponent?.championLegend,
+      {
+        type: 'CREATURE',
+      }
+    );
+    const legend = snapshotLegend ?? findCardWithTag(opponentCreatures, 'legend');
+    const leaderExcludeSet = buildExcludeSet(legend ?? undefined);
+    const snapshotLeader = convertChampionSnapshot(
+      spectatorOpponent?.championLeader ?? playerView?.opponent?.championLeader,
+      {
+        type: 'CREATURE',
+      }
+    );
+    const leader = snapshotLeader ?? findCardWithTag(opponentCreatures, 'leader', leaderExcludeSet);
+    return [legend, leader];
+  }, [
+    playerView?.opponent?.board?.creatures,
+    playerView?.opponent?.championLeader,
+    playerView?.opponent?.championLegend,
+    spectatorOpponent?.board?.creatures,
+    spectatorOpponent?.championLeader,
+    spectatorOpponent?.championLegend,
+  ]);
 
   const battlefields = spectatorState?.battlefields ?? [];
+  const controlledBattlefields = useMemo(
+    () => battlefields.filter((field) => field.controller === playerId),
+    [battlefields, playerId]
+  );
   const priorityWindow = spectatorState?.priorityWindow;
   const rawStatus = spectatorState?.status ?? 'in_progress';
   const matchStatus = rawStatus.toUpperCase();
   const isCoinFlipPhase = rawStatus === 'coin_flip';
+  const isBattlefieldPhaseActive = rawStatus === 'battlefield_selection';
   const canAct = Boolean(flow?.canAct);
+  const activeTurnPlayerId = useMemo(() => {
+    if (
+      typeof flow?.currentPlayerIndex === 'number' &&
+      spectatorPlayers.length > flow.currentPlayerIndex
+    ) {
+      return spectatorPlayers[flow.currentPlayerIndex]?.playerId ?? null;
+    }
+    return priorityWindow?.holder ?? null;
+  }, [flow?.currentPlayerIndex, priorityWindow?.holder, spectatorPlayers]);
   const canPlayCards =
     canAct &&
     rawStatus === 'in_progress' &&
     !mulliganPrompt &&
     !battlefieldPrompt;
+  useEffect(() => {
+    if (
+      pendingDeployment != null &&
+      (!canPlayCards || pendingDeployment >= currentPlayer.hand.length)
+    ) {
+      setPendingDeployment(null);
+    }
+  }, [canPlayCards, currentPlayer.hand.length, pendingDeployment]);
+  const canAdvancePhase = canAct && rawStatus === 'in_progress';
   const awaitingInitiativeResolution =
     rawStatus === 'coin_flip' &&
     !coinFlipPrompt &&
@@ -1279,19 +2463,186 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const playerChanneledRunes = rawCurrentPlayer?.channeledRunes ?? [];
   const opponentChanneledRunes = spectatorOpponent?.channeledRunes ?? [];
 
-  const playerRunes = useMemo(
-    () => createRuneSlots(playerChanneledRunes),
-    [playerChanneledRunes]
-  );
-  const opponentRunes = useMemo(
-    () => createRuneSlots(opponentChanneledRunes),
-    [opponentChanneledRunes]
+  const playerRunes = playerChanneledRunes;
+  const opponentRunes = opponentChanneledRunes;
+
+  const registerOptimisticRuneTaps = useCallback(
+    (indices: number[]) => {
+      if (!indices.length) {
+        return;
+      }
+      const tapKeys = indices
+        .map((index) => runeInstanceKey(playerRunes[index], index))
+        .filter((key): key is string => Boolean(key));
+      if (!tapKeys.length) {
+        return;
+      }
+      setOptimisticRuneTaps((prev) => {
+        const next = new Set(prev);
+        tapKeys.forEach((key) => next.add(key));
+        return next;
+      });
+      tapKeys.forEach((key) => {
+        if (!key) {
+          return;
+        }
+        const existing = runeTapTimeouts.current[key];
+        if (existing) {
+          clearTimeout(existing);
+        }
+        runeTapTimeouts.current[key] = setTimeout(() => {
+          setOptimisticRuneTaps((prev) => {
+            if (!prev.has(key)) {
+              return prev;
+            }
+            const next = new Set(prev);
+            next.delete(key);
+            return next;
+          });
+          delete runeTapTimeouts.current[key];
+        }, 1200);
+      });
+    },
+    [playerRunes]
   );
 
+  const [recycledRunes, setRecycledRunes] = useState<RecycledRuneEvent[]>([]);
+  const registerRuneRecycling = useCallback(
+    (owner: 'self' | 'opponent', runes: RuneState[]) => {
+      if (!runes.length) {
+        return;
+      }
+      const timestamp = Date.now();
+      setRecycledRunes((previous) => [
+        ...previous,
+        ...runes.map((rune, index) => ({
+          id: `${owner}-${rune.runeId}-${timestamp}-${index}-${Math.random().toString(36).slice(2, 7)}`,
+          owner,
+          rune,
+          addedAt: timestamp,
+        })),
+      ]);
+    },
+    []
+  );
+
+  const previousRuneListsRef = useRef<{ self: RuneState[]; opponent: RuneState[] }>({
+    self: playerRunes,
+    opponent: opponentRunes,
+  });
+
+  useEffect(() => {
+    const removed = diffRuneCollections(previousRuneListsRef.current.self ?? [], playerRunes);
+    if (removed.length) {
+      registerRuneRecycling('self', removed);
+    }
+    previousRuneListsRef.current.self = playerRunes;
+  }, [playerRunes, registerRuneRecycling]);
+
+  useEffect(() => {
+    const removed = diffRuneCollections(previousRuneListsRef.current.opponent ?? [], opponentRunes);
+    if (removed.length) {
+      registerRuneRecycling('opponent', removed);
+    }
+    previousRuneListsRef.current.opponent = opponentRunes;
+  }, [opponentRunes, registerRuneRecycling]);
+
+  useEffect(() => {
+    if (!recycledRunes.length) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      setRecycledRunes((previous) =>
+        previous.filter((event) => now - event.addedAt < RUNE_RECYCLE_DURATION_MS)
+      );
+    }, 350);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [recycledRunes.length]);
+
+  const playerRecycleEvents = useMemo(
+    () => recycledRunes.filter((event) => event.owner === 'self'),
+    [recycledRunes]
+  );
+  const opponentRecycleEvents = useMemo(
+    () => recycledRunes.filter((event) => event.owner === 'opponent'),
+    [recycledRunes]
+  );
+
+  useEffect(() => {
+    const current = playerRunes.length;
+    if (!battlefieldAdvanceComplete) {
+      runeCountRefs.current.self = current;
+      return;
+    }
+    if (!runeInitRefs.current.self) {
+      runeCountRefs.current.self = current;
+      runeInitRefs.current.self = true;
+      return;
+    }
+    const previous = runeCountRefs.current.self;
+    if (current > previous) {
+      const delta = current - previous;
+      const label = delta === 1 ? 'You channeled 1 rune.' : `You channeled ${delta} runes.`;
+      notify(label, 'success');
+    }
+    runeCountRefs.current.self = current;
+  }, [battlefieldAdvanceComplete, notify, playerRunes.length]);
+
+  useEffect(() => {
+    const current = opponentRunes.length;
+    if (!battlefieldAdvanceComplete) {
+      runeCountRefs.current.opponent = current;
+      return;
+    }
+    if (!runeInitRefs.current.opponent) {
+      runeCountRefs.current.opponent = current;
+      runeInitRefs.current.opponent = true;
+      return;
+    }
+    const previous = runeCountRefs.current.opponent;
+    if (current > previous) {
+      const delta = current - previous;
+      const label =
+        delta === 1
+          ? `${resolvePlayerLabel(opponentPlayerId, 'Opponent')} channeled 1 rune.`
+          : `${resolvePlayerLabel(opponentPlayerId, 'Opponent')} channeled ${delta} runes.`;
+      notify(label, 'info');
+    }
+    runeCountRefs.current.opponent = current;
+  }, [
+    battlefieldAdvanceComplete,
+    notify,
+    opponentPlayerId,
+    opponentRunes.length,
+    resolvePlayerLabel,
+  ]);
+
   const handlePlayCard = useCallback(
-    async (cardIndex: number) => {
+    async (
+      cardIndex: number,
+      destinationId?: string | null,
+      options?: { animateKey?: string | null }
+    ) => {
       if (!canPlayCards) {
         return;
+      }
+      const card = currentPlayer.hand[cardIndex];
+      if (!card) {
+        return;
+      }
+      const runePlan = evaluateRunePayment(card, playerRunes);
+      if (!runePlan.canPay) {
+        notify('Insufficient runes to play this card.', 'warning', { banner: true });
+        return;
+      }
+      if (options?.animateKey) {
+        triggerHandAnimation(options.animateKey);
+      }
+      if (runePlan.runeIndices.length) {
+        registerOptimisticRuneTaps(runePlan.runeIndices);
       }
       try {
         await playCard({
@@ -1299,15 +2650,28 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
             matchId,
             playerId,
             cardIndex,
+            destinationId: destinationId ?? null,
           },
         });
-        setActionMessage('Card played.');
+        notify('Card played.', 'success', { banner: true });
+        await refreshArenaState();
       } catch (error) {
         console.error('Failed to play card', error);
-        setActionMessage('Failed to play card.');
+        notify('Failed to play card.', 'error', { banner: true });
       }
     },
-    [canPlayCards, matchId, playCard, playerId]
+    [
+      canPlayCards,
+      currentPlayer.hand,
+      matchId,
+      notify,
+      playCard,
+      playerId,
+      playerRunes,
+      refreshArenaState,
+      registerOptimisticRuneTaps,
+      triggerHandAnimation,
+    ]
   );
 
   const handleSelectUnit = useCallback(
@@ -1335,16 +2699,16 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
             destinationId
           }
         });
-        setActionMessage(
-          destinationId === 'base' ? 'Unit returned to base.' : 'Unit moved to battlefield.'
-        );
+        const moveMessage =
+          destinationId === 'base' ? 'Unit returned to base.' : 'Unit moved to battlefield.';
+        notify(moveMessage, 'success', { banner: true });
         setSelectedUnit(null);
       } catch (error) {
         console.error('Failed to move unit', error);
-        setActionMessage('Unable to move unit.');
+        notify('Unable to move unit.', 'error', { banner: true });
       }
     },
-    [matchId, moveUnit, playerId, selectedUnit]
+    [matchId, moveUnit, notify, playerId, selectedUnit]
   );
 
   const handleInitiativeChoice = useCallback(
@@ -1361,11 +2725,11 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
             choice: choiceValue,
           },
         });
-        setActionMessage('Initiative choice locked in.');
+        notify('Initiative choice locked in.', 'success', { banner: true });
         await Promise.allSettled([refetchMatch(), refetchPlayerMatch()]);
       } catch (error) {
         console.error('Failed to submit initiative choice', error);
-        setActionMessage('Unable to lock initiative choice.');
+        notify('Unable to lock initiative choice.', 'error', { banner: true });
       }
     },
     [
@@ -1375,18 +2739,36 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       playerInitiativeLocked,
       refetchMatch,
       refetchPlayerMatch,
+      notify,
       submitInitiativeChoice,
     ]
+  );
+
+  const canAffordCard = useCallback(
+    (card?: BaseCard | null) => {
+      if (!card) {
+        return false;
+      }
+      return evaluateRunePayment(card, playerRunes).canPay;
+    },
+    [playerRunes]
+  );
+  const playableCardFlags = useMemo(
+    () =>
+      currentPlayer.hand.map((card) => {
+        if (!canPlayCards) {
+          return false;
+        }
+        return canAffordCard(card);
+      }),
+    [canAffordCard, canPlayCards, currentPlayer.hand]
   );
 
   const toggleMulliganSelection = (index: number) => {
     if (!mulliganPrompt) {
       return;
     }
-    const limit =
-      typeof mulliganPrompt.data?.maxReplacements === 'number'
-        ? mulliganPrompt.data.maxReplacements
-        : 2;
+    const limit = mulliganLimit;
     setMulliganSelection((prev) => {
       if (prev.includes(index)) {
         return prev.filter((value) => value !== index);
@@ -1403,28 +2785,161 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       toggleMulliganSelection(index);
       return;
     }
-    handlePlayCard(index);
+    const card = currentPlayer.hand[index];
+    if (!card) {
+      return;
+    }
+    const cardKey = resolveHandCardKey(card, index);
+    if (!canPlayCards) {
+      notify('You cannot play cards right now.', 'info', { banner: true });
+      return;
+    }
+    if (!playableCardFlags[index]) {
+      notify('Insufficient runes to play this card.', 'warning', { banner: true });
+      return;
+    }
+    const cardType = (card.type ?? '').toUpperCase();
+    if (cardType === 'CREATURE' && controlledBattlefields.length > 0) {
+      setPendingDeployment(index);
+      return;
+    }
+    void handlePlayCard(index, null, { animateKey: cardKey });
   };
 
-  const handleSubmitMulligan = async () => {
-    try {
-      await submitMulligan({
-        variables: {
-          matchId,
-          playerId,
-          indices: [...mulliganSelection].sort((a, b) => b - a),
-        },
-      });
-      setActionMessage(
-        mulliganSelection.length
-          ? `Replaced ${mulliganSelection.length} card(s)`
-          : 'Keeping current hand'
-      );
-      setMulliganSelection([]);
-    } catch (error) {
-      console.error('Failed to submit mulligan', error);
-      setActionMessage('Mulligan failed.');
+  const handleHandCardDragStart = useCallback(
+    (index: number, card: BaseCard, event: React.DragEvent<HTMLDivElement>) => {
+      if (!canPlayCards || mulliganPrompt) {
+        event.preventDefault();
+        return;
+      }
+      if (!playableCardFlags[index]) {
+        event.preventDefault();
+        return;
+      }
+      const cardType = (card.type ?? '').toUpperCase();
+      if (!['CREATURE', 'ARTIFACT', 'ENCHANTMENT'].includes(cardType)) {
+        event.preventDefault();
+        return;
+      }
+      setDraggingHandIndex(index);
+      setDraggingCardKey(resolveHandCardKey(card, index));
+    },
+    [canPlayCards, mulliganPrompt, playableCardFlags]
+  );
+
+  const handleHandCardDragEnd = useCallback(() => {
+    setDraggingHandIndex(null);
+    setBoardDragHover(false);
+    setDraggingCardKey(null);
+  }, []);
+
+  const handleBoardDragOver = useCallback(
+    (event: React.DragEvent) => {
+      if (draggingHandIndex === null) {
+        return;
+      }
+      event.preventDefault();
+       event.dataTransfer.dropEffect = 'move';
+      if (!boardDragHover) {
+        setBoardDragHover(true);
+      }
+    },
+    [boardDragHover, draggingHandIndex]
+  );
+
+  const handleBoardDragLeave = useCallback(
+    (event: React.DragEvent) => {
+      if (draggingHandIndex === null) {
+        return;
+      }
+      if (
+        event.currentTarget &&
+        event.relatedTarget &&
+        event.currentTarget.contains(event.relatedTarget as Node)
+      ) {
+        return;
+      }
+      setBoardDragHover(false);
+    },
+    [draggingHandIndex]
+  );
+
+  const handleBoardDrop = useCallback(
+    (event: React.DragEvent) => {
+      if (draggingHandIndex === null) {
+        return;
+      }
+      event.preventDefault();
+      const index = draggingHandIndex;
+      setDraggingHandIndex(null);
+      const animationKey = draggingCardKey;
+      setDraggingCardKey(null);
+      setBoardDragHover(false);
+      void handlePlayCard(index, 'base', { animateKey: animationKey ?? null });
+    },
+    [draggingCardKey, draggingHandIndex, handlePlayCard]
+  );
+
+  const submitMulliganChoice = useCallback(
+    async (selection: number[]) => {
+      try {
+        await submitMulligan({
+          variables: {
+            matchId,
+            playerId,
+            indices: [...selection].sort((a, b) => b - a),
+          },
+        });
+        const mulliganMessage = selection.length
+          ? `Replaced ${selection.length} card(s)`
+          : 'Keeping current hand';
+        notify(mulliganMessage, 'info', { banner: true });
+        setMulliganSelection([]);
+        await refreshArenaState();
+      } catch (error) {
+        console.error('Failed to submit mulligan', error);
+        notify('Mulligan failed.', 'error', { banner: true });
+      }
+    },
+    [matchId, notify, playerId, refreshArenaState, submitMulligan]
+  );
+
+  useEffect(() => {
+    if (!mulliganPrompt) {
+      autoMulliganRef.current = false;
+      return;
     }
+    if (
+      submittingMulligan ||
+      mulliganSelection.length === 0 ||
+      mulliganLimit <= 0 ||
+      mulliganSelection.length < mulliganLimit ||
+      autoMulliganRef.current
+    ) {
+      return;
+    }
+    autoMulliganRef.current = true;
+    void submitMulliganChoice([...mulliganSelection]);
+  }, [
+    mulliganLimit,
+    mulliganPrompt,
+    mulliganSelection,
+    submitMulliganChoice,
+    submittingMulligan,
+  ]);
+
+  useEffect(() => {
+    if (!submittingMulligan) {
+      autoMulliganRef.current = false;
+    }
+  }, [submittingMulligan]);
+
+  const handleKeepHand = () => {
+    void submitMulliganChoice([]);
+  };
+
+  const handleConfirmMulligan = () => {
+    void submitMulliganChoice(mulliganSelection);
   };
 
   const handleSelectBattlefield = async (battlefieldId: string) => {
@@ -1439,10 +2954,11 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           battlefieldId,
         },
       });
-      setActionMessage('Battlefield locked in.');
+      notify('Battlefield locked in.', 'success', { banner: true });
+      await refreshArenaState();
     } catch (error) {
       console.error('Failed to select battlefield', error);
-      setActionMessage('Unable to select battlefield.');
+      notify('Unable to select battlefield.', 'error', { banner: true });
     }
   };
 
@@ -1454,10 +2970,11 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           playerId,
         },
       });
-      setActionMessage('Phase advanced.');
+      notify('Phase advanced.', 'success', { banner: true });
+      await refreshArenaState();
     } catch (error) {
       console.error('Failed to advance phase', error);
-      setActionMessage('Unable to advance phase.');
+      notify('Unable to advance phase.', 'error', { banner: true });
     }
   };
 
@@ -1474,9 +2991,62 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       });
     } catch (error) {
       console.error('Failed to concede', error);
-      setActionMessage('Unable to concede right now.');
+      notify('Unable to concede right now.', 'error', { banner: true });
     }
   };
+
+  const handleChatSubmit = useCallback(
+    async (event?: React.FormEvent) => {
+      event?.preventDefault();
+      const trimmed = chatInput.trim();
+      if (!trimmed) {
+        return;
+      }
+      const optimisticId = `optimistic-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const optimisticEntry: ChatMessageEntry = {
+        id: optimisticId,
+        message: trimmed,
+        playerId,
+        playerName: selfDisplayName ?? 'You',
+        timestamp: new Date().toISOString(),
+        optimistic: true,
+      };
+      setChatMessages((prev) => [...prev, optimisticEntry]);
+      setChatInput('');
+      try {
+        const response = await sendChatMessageMutation({
+          variables: {
+            matchId,
+            playerId,
+            message: trimmed,
+          },
+        });
+        setChatMessages((prev) => prev.filter((entry) => entry.id !== optimisticId));
+        const serverLog = response.data?.sendChatMessage?.gameState?.chatLog ?? null;
+        if (serverLog) {
+          syncChatMessages(serverLog);
+        }
+        await refreshArenaState();
+      } catch (error) {
+        setChatMessages((prev) => prev.filter((entry) => entry.id !== optimisticId));
+        setChatInput(trimmed);
+        console.error('Failed to send chat message', error);
+        const apolloError = error as ApolloError;
+        const detail = apolloError?.message ?? 'Unable to deliver your message.';
+        notify(`Failed to send message: ${detail}`, 'error');
+      }
+    },
+    [
+      chatInput,
+      matchId,
+      notify,
+      playerId,
+      refreshArenaState,
+      sendChatMessageMutation,
+      selfDisplayName,
+      syncChatMessages,
+    ]
+  );
 
   const battlefieldOptions =
     (battlefieldPrompt?.data &&
@@ -1505,20 +3075,83 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         name: label,
         type: snapshot?.type ?? 'Battlefield',
         text: snapshot?.effect ?? undefined,
+        slug: snapshot?.slug ?? option.slug ?? undefined,
       });
+      const art =
+        getCardImage(card) ??
+        buildCardArtUrl(snapshot?.slug ?? option.slug ?? null);
       return {
         id: optionId,
         label,
         description,
         card,
+        art,
       };
     });
   }, [battlefieldOptions]);
-
-  const mulliganLimit =
-    typeof mulliganPrompt?.data?.maxReplacements === 'number'
-      ? mulliganPrompt?.data?.maxReplacements
-      : 2;
+  const renderBattlefieldChoice = (
+    choice: BattlefieldChoice,
+    options?: { spotlight?: boolean; selected?: boolean }
+  ) => {
+    const disabled = selectingBattlefield;
+    const activateSelection = () => {
+      if (disabled) {
+        return;
+      }
+      void handleSelectBattlefield(choice.id);
+    };
+    const imageClasses = [
+      'battlefield-art-img',
+      options?.spotlight ? 'battlefield-art-img--spotlight' : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    return (
+      <div
+        key={choice.id}
+        className={[
+          'battlefield-choice',
+          options?.spotlight ? 'battlefield-choice--screen' : '',
+          options?.selected ? 'battlefield-choice--selected' : '',
+          disabled ? 'battlefield-choice--disabled' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
+      >
+        {choice.art ? (
+          <button
+            type="button"
+            className={['battlefield-art-button', imageClasses].filter(Boolean).join(' ')}
+            onClick={activateSelection}
+            disabled={disabled}
+            aria-label={choice.label}
+            title={choice.description ?? choice.label}
+          >
+            <img
+              src={choice.art}
+              alt={choice.label}
+              width={270}
+              height={400}
+              style={{ width: '270px', height: 'auto' }}
+              loading="lazy"
+              draggable={false}
+            />
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="battlefield-art-placeholder"
+            onClick={activateSelection}
+            disabled={disabled}
+            aria-label={choice.label}
+            title={choice.description ?? choice.label}
+          >
+            {choice.label}
+          </button>
+        )}
+      </div>
+    );
+  };
 
   const playerGraveyard =
     spectatorSelf?.graveyard ?? rawCurrentPlayer?.graveyard ?? [];
@@ -1535,6 +3168,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         cardId: field.battlefieldId,
         name: field.name,
         type: 'Battlefield',
+        slug: field.card?.slug ?? field.slug ?? undefined,
       });
       selectionMap.set(field.ownerId, {
         playerId: field.ownerId,
@@ -1551,6 +3185,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       if (existing?.source === 'final') {
         return;
       }
+      const promptResolved = Boolean(prompt.resolved);
       const resolutionId =
         (prompt.resolution?.battlefieldId ??
           prompt.resolution?.cardId ??
@@ -1562,8 +3197,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
             playerId: prompt.playerId,
             name: playerNameLookup.get(prompt.playerId) ?? undefined,
             isSelf: prompt.playerId === playerId,
-            locked: false,
-            source: 'pending',
+            locked: promptResolved,
+            source: promptResolved ? 'prompt' : 'pending',
             card: null,
           });
         }
@@ -1588,6 +3223,11 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           cardId: resolutionId,
           name: matchedOption?.name ?? 'Battlefield',
           type: 'Battlefield',
+          slug:
+            matchedOption?.cardSnapshot?.slug ??
+            matchedOption?.card?.slug ??
+            matchedOption?.slug ??
+            undefined,
           text:
             matchedOption?.description ??
             matchedOption?.cardSnapshot?.effect ??
@@ -1620,7 +3260,150 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       };
     });
   }, [battlefields, battlefieldPrompts, playerId, playerNameLookup, spectatorPlayers]);
-  const allBattlefieldsLocked = battlefieldStatus.every((entry) => entry.locked);
+  const totalBattlefieldEntries = battlefieldStatus.length;
+  const lockedBattlefieldCount = battlefieldStatus.filter((entry) => entry.locked).length;
+  const allBattlefieldsLocked =
+    totalBattlefieldEntries > 0 && lockedBattlefieldCount === totalBattlefieldEntries;
+  const playerBattlefieldStatus =
+    battlefieldStatus.find((entry) => entry.playerId === playerId) ??
+    battlefieldStatus.find((entry) => entry.isSelf) ??
+    null;
+  const opponentBattlefieldStatus =
+    (opponentPlayerId
+      ? battlefieldStatus.find((entry) => entry.playerId === opponentPlayerId)
+      : null) ??
+    battlefieldStatus.find((entry) => entry.playerId && entry.playerId !== playerId) ??
+    null;
+  const playerBattlefieldLocked = playerBattlefieldStatus?.locked ?? false;
+  const opponentBattlefieldLocked = opponentBattlefieldStatus?.locked ?? false;
+  const bothBattlefieldsLocked = playerBattlefieldLocked && opponentBattlefieldLocked;
+  const canRevealOpponentBattlefieldChoices = playerBattlefieldLocked && opponentBattlefieldLocked;
+  const playerBattlefieldSelectionId = cardIdValue(playerBattlefieldStatus?.card ?? undefined);
+  const playerBattlefieldCard = playerBattlefieldStatus?.card ?? null;
+  const pendingDeploymentCard =
+    pendingDeployment != null ? currentPlayer.hand[pendingDeployment] ?? null : null;
+  const pendingDeploymentKey =
+    pendingDeploymentCard != null
+      ? resolveHandCardKey(pendingDeploymentCard, pendingDeployment)
+      : pendingDeployment != null
+        ? resolveHandCardKey(null, pendingDeployment)
+        : null;
+  const trackedBattlefieldStatuses = battlefieldStatus.filter((entry) => {
+    if (!entry.playerId) {
+      return false;
+    }
+    return entry.playerId === playerId || (opponentPlayerId && entry.playerId === opponentPlayerId);
+  });
+  const pendingBattlefieldPlayers = (trackedBattlefieldStatuses.length
+    ? trackedBattlefieldStatuses
+    : battlefieldStatus
+  ).filter((entry) => !entry.locked);
+  const pendingBattlefieldNames = pendingBattlefieldPlayers.map((entry) =>
+    entry.playerId === playerId ? 'you' : entry.name ?? 'opponent'
+  );
+  const pendingBattlefieldMessage = (() => {
+    if (pendingBattlefieldNames.length === 0) {
+      return 'Waiting for battlefield data...';
+    }
+    if (pendingBattlefieldNames.length === 1) {
+      return pendingBattlefieldNames[0] === 'you'
+        ? 'Waiting for you to lock your battlefield.'
+        : `Waiting for ${pendingBattlefieldNames[0]} to lock their battlefield.`;
+    }
+    const formatted =
+      pendingBattlefieldNames.length === 2
+        ? pendingBattlefieldNames.join(' and ')
+        : `${pendingBattlefieldNames.slice(0, -1).join(', ')}, and ${
+            pendingBattlefieldNames[pendingBattlefieldNames.length - 1]
+          }`;
+    return `Waiting for ${formatted} to lock their battlefields.`;
+  })();
+  const waitingForBattlefieldData = bothBattlefieldsLocked && battlefields.length === 0;
+  useEffect(() => {
+    if (!bothBattlefieldsLocked || battlefieldAdvanceTriggered) {
+      return;
+    }
+    setBattlefieldAdvanceTriggered(true);
+    setBattlefieldCountdown(BATTLEFIELD_REVEAL_COUNTDOWN_SECONDS);
+  }, [bothBattlefieldsLocked, battlefieldAdvanceTriggered]);
+  useEffect(() => {
+    if (battlefieldCountdown === null || battlefieldCountdown <= 0) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      setBattlefieldCountdown((prev) => {
+        if (prev == null) {
+          return null;
+        }
+        return prev > 0 ? prev - 1 : 0;
+      });
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [battlefieldCountdown]);
+  useEffect(() => {
+    if (!battlefieldAdvanceTriggered || battlefieldAdvanceComplete) {
+      return;
+    }
+    if (
+      battlefieldCountdown !== null &&
+      battlefieldCountdown <= 0 &&
+      !isBattlefieldPhaseActive &&
+      !waitingForBattlefieldData
+    ) {
+      setBattlefieldAdvanceComplete(true);
+    }
+  }, [
+    battlefieldAdvanceComplete,
+    battlefieldAdvanceTriggered,
+    battlefieldCountdown,
+    isBattlefieldPhaseActive,
+    waitingForBattlefieldData,
+  ]);
+  useEffect(() => {
+    if (!waitingForBattlefieldData) {
+      return;
+    }
+    let cancelled = false;
+    const triggerRefresh = () => {
+      if (cancelled) {
+        return;
+      }
+      void refreshArenaState();
+    };
+    triggerRefresh();
+    const interval = setInterval(triggerRefresh, 1500);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [waitingForBattlefieldData, refreshArenaState]);
+
+  useEffect(() => {
+    if (!isBattlefieldPhaseActive) {
+      return;
+    }
+    let cancelled = false;
+    const triggerRefresh = () => {
+      if (cancelled) {
+        return;
+      }
+      void refreshArenaState();
+    };
+    triggerRefresh();
+    const interval = setInterval(triggerRefresh, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [isBattlefieldPhaseActive, refreshArenaState]);
+
+  useEffect(() => {
+    if (!battlefieldAdvanceComplete) {
+      return;
+    }
+    void refreshArenaState();
+  }, [battlefieldAdvanceComplete, refreshArenaState]);
+
   const initiativeChoices = useMemo(() => {
     if (coinFlipPrompt?.data?.options && Array.isArray(coinFlipPrompt.data.options)) {
       return (coinFlipPrompt.data.options as Array<Record<string, any>>).map((option) => {
@@ -1642,6 +3425,21 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     }
     return INITIATIVE_OPTIONS;
   }, [coinFlipPrompt]);
+
+  useEffect(() => {
+    if (!selfZoneRef.current) {
+      lastTurnHolderRef.current = activeTurnPlayerId ?? null;
+      return;
+    }
+    if (
+      activeTurnPlayerId &&
+      activeTurnPlayerId === playerId &&
+      lastTurnHolderRef.current !== activeTurnPlayerId
+    ) {
+      selfZoneRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    lastTurnHolderRef.current = activeTurnPlayerId ?? null;
+  }, [activeTurnPlayerId, playerId]);
 
   if (matchInitializing && !hasMatchInitTimedOut) {
     return (
@@ -1715,13 +3513,25 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     ),
   };
   const handInteractable = Boolean(mulliganPrompt || canPlayCards);
+  const holdBattlefieldReveal = battlefieldAdvanceTriggered && !battlefieldAdvanceComplete;
   const showInitiativeScreen =
-    rawStatus === 'coin_flip' || !spectatorState?.initiativeWinner || initiativeRevealActive;
+    !battlefieldAdvanceTriggered &&
+    (rawStatus === 'coin_flip' || (initiativeOutcome && initiativeRevealActive));
+  const showBattlefieldScreen =
+    !showInitiativeScreen &&
+    (isBattlefieldPhaseActive || waitingForBattlefieldData || holdBattlefieldReveal);
   const showingInitiativeResult = Boolean(
     initiativeOutcome && !isCoinFlipPhase && initiativeRevealActive
   );
   const opponentHeading = resolvePlayerLabel(opponentPlayerId, 'Opponent');
   const selfHeading = resolvePlayerLabel(playerId, 'You');
+  const mulliganPromptPending = playerMulliganPending || opponentMulliganPending;
+  const showMulliganModal =
+    mulliganPromptPending && !showInitiativeScreen && !showBattlefieldScreen;
+  const mulliganWaitingMessage =
+    !playerMulliganPending && opponentMulliganPending
+      ? `Waiting for ${opponentHeading}'s mulligan choice`
+      : null;
   const selfBoardTitle = selfHeading === 'You' ? 'Your Board' : `${selfHeading}'s Board`;
   const initiativeWinnerDisplay = initiativeOutcome
     ? resolvePlayerLabel(initiativeOutcome.winnerId, 'Unknown duelist')
@@ -1732,7 +3542,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const boardPrompts = (
     <div className="prompt-panel board-prompts">
-        {battlefieldPrompt && (
+        {battlefieldPrompt && !showBattlefieldScreen && (
           <div className="prompt-card battlefield-prompt">
             <div className="prompt-title">Battlefield Selection</div>
             <p>Select one of your battlefields to bring into the arena.</p>
@@ -1740,21 +3550,15 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
               {normalizedBattlefieldChoices.length === 0 && (
                 <span className="muted-text">Waiting on available options...</span>
               )}
-              {normalizedBattlefieldChoices.map((choice) => (
-                <button
-                  key={choice.id}
-                  className="battlefield-choice"
-                  disabled={selectingBattlefield}
-                  onClick={() => handleSelectBattlefield(choice.id)}
-                >
-                  <CardTile card={choice.card} label={choice.label} />
-                  <span className="choice-note">{choice.description}</span>
-                </button>
-              ))}
+              {normalizedBattlefieldChoices.map((choice) => renderBattlefieldChoice(choice))}
             </div>
             <div className="battlefield-status-grid">
               {battlefieldStatus.map((entry) => {
                 const selectionCard = entry.card;
+                const maskSelection =
+                  Boolean(selectionCard) &&
+                  !entry.isSelf &&
+                  !canRevealOpponentBattlefieldChoices;
                 return (
                   <div
                     key={entry.playerId}
@@ -1779,9 +3583,16 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                       </span>
                     </div>
                     {selectionCard ? (
-                      <div className="selection-card">
-                        <CardTile card={selectionCard} compact />
-                      </div>
+                      maskSelection ? (
+                        <div className="selection-card selection-card--hidden">
+                          <div className="card-back card-back--small" aria-hidden="true" />
+                          <span>Hidden until both duelists lock in.</span>
+                        </div>
+                      ) : (
+                        <div className="selection-card">
+                          <CardTile card={selectionCard} compact />
+                        </div>
+                      )
                     ) : (
                       <div className="pill-empty">No battlefield selected</div>
                     )}
@@ -1803,33 +3614,6 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
             </div>
           </div>
         )}
-      {mulliganPrompt && (
-        <div className="prompt-card">
-          <div className="prompt-title">Mulligan Window</div>
-          <p>Select up to {mulliganLimit} card(s) to redraw before the duel begins.</p>
-          <div className="prompt-actions">
-            <span>
-              Selected: {mulliganSelection.length}/{mulliganLimit}
-            </span>
-            <button
-              className="prompt-button primary"
-              onClick={handleSubmitMulligan}
-              disabled={submittingMulligan}
-            >
-              {submittingMulligan ? 'Submitting...' : 'Lock Mulligan'}
-            </button>
-          </div>
-        </div>
-      )}
-      {!battlefieldPrompt && !mulliganPrompt && (
-        <div className="prompt-card muted">
-          <div className="prompt-title">Awaiting Next Phase</div>
-          <p>
-            The arena will highlight this area whenever decisions are required.
-            Monitor the priority indicator above to stay in sync.
-          </p>
-        </div>
-      )}
     </div>
   );
 
@@ -1923,20 +3707,24 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         </div>
         <div className="artifact-panel">
           <div className="section-title">{opponentHeading}'s pick</div>
-          {opponentChoiceMeta ? (
-            <div className="artifact-card opponent">
-              <Image
-                src={opponentChoiceMeta.image}
-                alt={`${opponentHeading} choice`}
-                width={140}
-                height={140}
-              />
-              <span>{opponentChoiceMeta.label}</span>
-            </div>
-          ) : opponentInitiativeLocked ? (
-            <div className="artifact-placeholder">Awaiting reveal…</div>
+          {canRevealOpponentChoice ? (
+            opponentChoiceMeta ? (
+              <div className="artifact-card opponent">
+                <Image
+                  src={opponentChoiceMeta.image}
+                  alt={`${opponentHeading} choice`}
+                  width={140}
+                  height={140}
+                />
+                <span>{opponentChoiceMeta.label}</span>
+              </div>
+            ) : (
+              <div className="artifact-placeholder">Awaiting reveal…</div>
+            )
+          ) : awaitingOpponentSelection ? (
+            <div className="artifact-placeholder">Waiting for opponent&apos;s selection…</div>
           ) : (
-            <div className="artifact-placeholder">Waiting for selection…</div>
+            <div className="artifact-placeholder">Choose an artifact to reveal their pick.</div>
           )}
         </div>
       </div>
@@ -1983,234 +3771,504 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     </div>
   );
 
-
-  const opponentMat = (
-    <section className="player-mat opponent-panel">
-      <div className="mat-header">
-        <div>
-          <h2>{opponentHeading}</h2>
-          <div className="score-pill">
-            Score: {resolvedOpponent.victoryPoints ?? 0}/
-            {resolvedOpponent.victoryScore ?? currentPlayer.victoryScore}
+  const battlefieldView = (
+    <div className="battlefield-screen">
+      <div className="duel-intro">
+        <h2>Battlefield Selection</h2>
+        <p>
+          Each duelist must commit one of their prepared battlefields before the match begins.
+          Your choice remains hidden until both players lock in.
+        </p>
+      </div>
+      <div className="battlefield-choice-wrapper">
+        {playerBattlefieldLocked ? (
+          <div className="locked-card-callout">
+            <div className="prompt-title">Battlefield locked</div>
+            {playerBattlefieldCard ? (
+              <CardTile card={playerBattlefieldCard} label="Your battlefield" />
+            ) : (
+              <div className="pill-empty">Awaiting confirmation…</div>
+            )}
+            <p className="muted-text">
+              {opponentBattlefieldLocked
+                ? 'Both battlefields are locked. Finalizing the arena…'
+                : `Waiting for ${opponentHeading} to finish their selection.`}
+            </p>
+          </div>
+        ) : normalizedBattlefieldChoices.length === 0 ? (
+          <div className="prompt-card muted duel-wait">
+            <p>Loading your battlefield cards…</p>
+          </div>
+        ) : (
+          <div className="battlefield-choice-grid battlefield-choice-grid--spotlight">
+            {normalizedBattlefieldChoices.map((choice) => {
+              const choiceId = cardIdValue(choice.card) || choice.id;
+              const isLockedSelection =
+                Boolean(playerBattlefieldSelectionId) &&
+                Boolean(choiceId) &&
+                playerBattlefieldSelectionId === choiceId;
+              return renderBattlefieldChoice(choice, {
+                spotlight: true,
+                selected: isLockedSelection,
+              });
+            })}
+          </div>
+        )}
+      </div>
+      <div className="battlefield-status-grid battlefield-status-grid--full">
+        {battlefieldStatus.map((entry) => {
+          const selectionCard = entry.card;
+          const maskSelection =
+            Boolean(selectionCard) &&
+            !entry.isSelf &&
+            !canRevealOpponentBattlefieldChoices;
+          return (
+            <div
+              key={`battlefield-status-${entry.playerId}`}
+              className={[
+                'selection-pill',
+                entry.isSelf ? 'selection-pill--self' : '',
+                entry.locked ? 'selection-pill--ready' : '',
+              ]
+                .filter(Boolean)
+                .join(' ')}
+            >
+              <div className="pill-header">
+                <span className="pill-player">
+                  {entry.isSelf ? 'You' : entry.name ?? 'Opponent'}
+                </span>
+                <span className="pill-status">
+                  {entry.locked
+                    ? 'Battlefield locked in'
+                    : entry.isSelf
+                      ? 'Choose a battlefield'
+                      : 'Waiting on selection'}
+                </span>
+              </div>
+              {selectionCard ? (
+                maskSelection ? (
+                  <div className="selection-card selection-card--hidden">
+                    <div className="card-back card-back--small" aria-hidden="true" />
+                    <span>Hidden until both duelists lock in.</span>
+                  </div>
+                ) : (
+                  <div className="selection-card">
+                    <CardTile card={selectionCard} compact />
+                  </div>
+                )
+              ) : (
+                <div className="pill-empty">No battlefield selected</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div
+        className={[
+          'battlefield-progress',
+          (battlefieldAdvanceTriggered || allBattlefieldsLocked) ? 'battlefield-progress--ready' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
+      >
+        {battlefieldAdvanceTriggered ? (
+          <div className="battlefield-countdown">
+            <span className="phase-spinner" aria-hidden="true" />
+            <span>
+              Arena launching in {Math.max(battlefieldCountdown ?? 0, 0)}s…
+            </span>
+          </div>
+        ) : waitingForBattlefieldData ? (
+          <div className="battlefield-countdown">
+            <span className="phase-spinner" aria-hidden="true" />
+            <span>Deploying selected battlefields…</span>
+          </div>
+        ) : allBattlefieldsLocked ? (
+          'Both battlefields are locked in. Finalizing the arena…'
+        ) : (
+          pendingBattlefieldMessage
+        )}
+      </div>
+    </div>
+  );
+  const renderPlayerZone = (side: 'self' | 'opponent') => {
+    const isSelf = side === 'self';
+    const zoneClass = ['player-zone', isSelf ? 'player-zone--self' : 'player-zone--opponent']
+      .filter(Boolean)
+      .join(' ');
+    const sideKey = isSelf ? 'self' : 'opponent';
+    const runeTokensList = isSelf ? playerRunes : opponentRunes;
+    const runeDeckCount = isSelf
+      ? currentPlayer.runeDeck?.length ?? 0
+      : spectatorOpponent?.runeDeck?.length ??
+        spectatorOpponent?.runeDeckSize ??
+        resolvedOpponent.runeDeckSize ??
+        0;
+    const deckCount = isSelf ? playerDeckOrder.length : opponentDeckOrder.length;
+    const graveyardCards = isSelf ? playerGraveyard : opponentGraveyard;
+    const baseUnits = isSelf ? playerBaseUnits : opponentBaseUnits;
+    const frontlineBoard = isSelf ? playerFrontlineBoard : opponentFrontlineBoard;
+    const legendRef = isSelf ? legendCard : opponentLegend;
+    const leaderRef = isSelf ? leaderCard : opponentLeader;
+    const handCount = isSelf ? currentPlayer.hand.length : opponentHandSize;
+    const championExclude = buildExcludeSet(legendRef ?? undefined, leaderRef ?? undefined);
+    const formationCards = combineBoardCards(
+      baseUnits,
+      frontlineBoard?.creatures,
+      frontlineBoard?.artifacts,
+      frontlineBoard?.enchantments
+    ).filter((card) => !championExclude.has(cardIdValue(card)));
+    const handControls = isSelf
+      ? (
+        <>
+          <button
+            type="button"
+            className="prompt-button primary end-phase-button"
+            onClick={handleNextPhase}
+            disabled={!canAdvancePhase || advancingPhase}
+          >
+            {advancingPhase ? 'Advancing…' : 'End Phase'}
+          </button>
+          <button
+            type="button"
+            className="prompt-button danger"
+            onClick={handleConcede}
+          >
+            Concede
+          </button>
+        </>
+      )
+      : null;
+    const matClasses = [
+      'player-mat',
+      isSelf ? 'player-mat--self' : 'player-mat--opponent',
+      isSelf && boardDragHover ? 'player-mat--drag-hover' : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    const matDragHandlers = isSelf
+      ? {
+          onDragOver: handleBoardDragOver,
+          onDragEnter: handleBoardDragOver,
+          onDragLeave: handleBoardDragLeave,
+          onDrop: handleBoardDrop,
+        }
+      : {};
+    const formationClasses = [
+      'player-lane',
+      'player-lane--formation',
+      isSelf && boardDragHover ? 'player-lane--drag-hover' : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    return (
+      <section className={zoneClass} ref={isSelf ? selfZoneRef : undefined}>
+        {(!isSelf && (
+          <div className="player-zone__hand player-zone__hand--opponent">
+            <HiddenHand count={handCount} />
+          </div>
+        )) || null}
+        <div className={matClasses} {...matDragHandlers}>
+          <div className="player-mat__core">
+            {(
+              isSelf
+                ? ['formation', 'runes']
+                : ['runes', 'formation']
+            ).map((lane) => {
+              if (lane === 'runes') {
+                return (
+                  <div key={`${sideKey}-runes`} className="player-lane player-lane--runes">
+                    <div className="base-grid rune-base-grid">
+                      <div className="section-title">Channeled Runes</div>
+                      <div className="card-row rune-card-row">
+                        {isSelf && (
+                        <div className="rune-deck-slot">
+                          <CardBackStack label="Rune Deck" count={runeDeckCount} />
+                        </div>
+                      )}
+                        <div className="rune-token-strip-wrapper">
+                          <RuneTokens
+                            runes={runeTokensList}
+                            optimisticTaps={isSelf ? optimisticRuneTaps : undefined}
+                          />
+                          <RuneRecycleLayer
+                            events={isSelf ? playerRecycleEvents : opponentRecycleEvents}
+                          />
+                        </div>
+                        {!isSelf && (
+                          <div className="rune-deck-slot">
+                            <CardBackStack label="Rune Deck" count={runeDeckCount} />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+              return (
+                <div key={`${sideKey}-formation`} className={formationClasses}>
+                  <BaseGrid
+                    title="Base"
+                    cards={formationCards}
+                    onCardSelect={isSelf && canAct ? handleSelectUnit : undefined}
+                    selectable={isSelf && canAct}
+                    selectedCardId={isSelf ? selectedUnit : undefined}
+                  />
+                </div>
+              );
+            })}
+          </div>
+          <div className="player-mat__support">
+            {!isSelf && (
+              <div className="player-mat__stack player-mat__stack--opponent">
+                <DeckStack
+                  label="Deck"
+                  count={deckCount}
+                  owner="opponent"
+                  drawAnimations={opponentDrawAnimations}
+                  onAnimationComplete={handleDrawAnimationComplete}
+                />
+                <GraveyardPile cards={graveyardCards} compact />
+              </div>
+            )}
+            {isSelf && (
+              <div className="player-mat__stack">
+                <GraveyardPile cards={graveyardCards} compact />
+                <DeckStack
+                  label="Deck"
+                  count={deckCount}
+                  owner="self"
+                  drawAnimations={playerDrawAnimations}
+                  onAnimationComplete={handleDrawAnimationComplete}
+                />
+              </div>
+            )}
           </div>
         </div>
-        <span className="muted small">Hand: {opponentHandSize}</span>
+        {isSelf && (
+          <div className="player-zone__hand">
+            <HandRow
+              isSelf
+              cards={currentPlayer.hand}
+              handSize={currentPlayer.hand.length}
+              onCardClick={handleHandCardClick}
+              onCardDragStart={handleHandCardDragStart}
+              onCardDragEnd={handleHandCardDragEnd}
+              mulliganSelection={mulliganSelection}
+              canInteract={handInteractable}
+              idleLabel="Awaiting commands"
+              controls={handControls}
+              cardWidth={125}
+              playableStates={playableCardFlags}
+              playingCardKeys={handPlayAnimations}
+            />
+          </div>
+        )}
+      </section>
+    );
+  };
+
+  const battlefieldStage = (
+    <div className="battlefield-stage">
+      <div className="battlefield-stage__cards">
+        {battlefields.length === 0 ? (
+          <div className="empty-slot wide">Deploying selected battlefields…</div>
+        ) : (
+          battlefields.map((field) => {
+            const battlefieldCard = snapshotToBaseCard(field.card, {
+              cardId: field.battlefieldId,
+              name: field.name,
+              type: 'Battlefield',
+              slug: field.card?.slug ?? field.slug ?? undefined,
+            });
+            const art =
+              getCardImage(battlefieldCard) ??
+              buildCardArtUrl(field.slug ?? field.card?.slug ?? null);
+            return (
+              <div className="battlefield-stage__card" key={field.battlefieldId}>
+                {art ? (
+                  <img
+                    src={art}
+                    alt={field.name ?? 'Battlefield'}
+                    className="battlefield-stage__art"
+                    width={200}
+                    height={280}
+                    loading="lazy"
+                    draggable={false}
+                  />
+                ) : (
+                  <CardTile card={battlefieldCard} label={field.name ?? 'Battlefield'} />
+                )}
+                {selectedUnitCard && (
+                  <button
+                    className="prompt-button secondary"
+                    onClick={() => handleMoveSelected(field.battlefieldId)}
+                    disabled={
+                      !canAct ||
+                      movingUnit ||
+                      !selectedUnitCard ||
+                      (selectedUnitCard.location?.zone === 'battlefield' &&
+                        selectedUnitCard.location?.battlefieldId === field.battlefieldId)
+                    }
+                  >
+                    {movingUnit ? 'Deploying…' : `Deploy to ${field.name ?? 'battlefield'}`}
+                  </button>
+                )}
+              </div>
+            );
+          })
+        )}
       </div>
-      <div className="mat-upper">
-        <div className="mat-zone">
-          <DeckStack
-            label="Deck"
-            count={opponentDeckOrder.length}
-            owner="opponent"
-            drawAnimations={opponentDrawAnimations}
-            onAnimationComplete={handleDrawAnimationComplete}
-          />
-        </div>
-        <div className="mat-zone">
-          <RuneGrid title="Runes" slots={opponentRunes} compact />
-        </div>
-        <div className="mat-zone champion-stack">
-          <CardTile card={opponentLegend} label="Legend" />
-          <CardTile card={opponentLeader} label="Leader" />
-        </div>
-        <div className="mat-zone">
-          <GraveyardPile cards={opponentGraveyard} compact />
-        </div>
-      </div>
-      <div className="mat-center">
-        <BoardGrid board={opponentFrontlineBoard} excludeIds={opponentExclude} compact />
-      </div>
-      <div className="mat-lower">
-        <BaseGrid title="Base" cards={opponentBaseUnits} />
-        <HandRow
-          isSelf={false}
-          cards={[]}
-          handSize={opponentHandSize}
-          onCardClick={undefined}
-          mulliganSelection={[]}
-          canInteract={false}
-          idleLabel="Opponent hand hidden"
-        />
-      </div>
-    </section>
+    </div>
   );
 
-  const selfMat = (
-    <section className="player-mat self-panel">
-      <div className="mat-header">
-        <div>
-          <h2>{selfBoardTitle}</h2>
-          <div className="score-pill">
-            Score: {currentPlayer.victoryPoints}/{currentPlayer.victoryScore}
-          </div>
-        </div>
-        <div className="resource-block">
-          <span>
-            Mana: {currentPlayer.mana}/{currentPlayer.maxMana}
-          </span>
-          <span>Energy: {currentPlayer.resources.energy}</span>
-          <span>Universal: {currentPlayer.resources.universalPower}</span>
-          <span>Power: {formatPowerPool(currentPlayer.resources.power)}</span>
+  const matchInfoPanel = (
+    <div className="match-info-panel">
+      <div>
+        <span>Status</span>
+        <strong>{friendlyStatus(matchStatus)}</strong>
+      </div>
+      <div>
+        <span>Phase</span>
+        <strong>{flow?.currentPhase ?? 'Unknown'}</strong>
+      </div>
+      <div>
+        <span>Turn</span>
+        <strong>{flow?.turnNumber ?? spectatorState.turnNumber}</strong>
+      </div>
+      <div>
+        <span>Priority</span>
+        <strong>
+          {priorityWindow
+            ? priorityWindow.holder === playerId
+              ? 'You'
+              : 'Opponent'
+            : 'Open'}
+        </strong>
+      </div>
+    </div>
+  );
+
+  const renderChampionPanel = (
+    title: string,
+    legend: BaseCard | null,
+    leader: BaseCard | null
+  ) => (
+    <div className="sidebar-champions">
+      <h4>{title}</h4>
+      <div className="champion-focus-group">
+        <CardTile card={legend ?? undefined} label="Legend" compact widthPx={125} />
+        <CardTile card={leader ?? undefined} label="Leader" compact widthPx={125} />
+      </div>
+    </div>
+  );
+
+  const playerChampionPanel = renderChampionPanel('Your Champions', legendCard ?? null, leaderCard ?? null);
+  const opponentChampionPanel = renderChampionPanel(
+    `${opponentHeading}'s Champions`,
+    opponentLegend ?? null,
+    opponentLeader ?? null
+  );
+
+  const championSidebar = (
+    <aside className="arena-sidebar arena-sidebar--champions">
+      <div className="champion-stack">{opponentChampionPanel}</div>
+      <div className="champion-stack">{playerChampionPanel}</div>
+    </aside>
+  );
+
+  const duelLogSidebar = (
+    <aside className="arena-log-panel">
+      <div className="duel-log">
+        <h4>Duel Log</h4>
+        <div className="duel-log__list">
+          {duelLog.length === 0 ? (
+            <div className="duel-log__empty">Awaiting actions…</div>
+          ) : (
+            duelLog.map((entry) => (
+              <div
+                key={entry.id}
+                className={['duel-log__entry', `duel-log__entry--${entry.tone}`]
+                  .filter(Boolean)
+                  .join(' ')}
+              >
+                <div className="duel-log__message">{entry.message}</div>
+                <div className="duel-log__timestamp">
+                  {new Date(entry.timestamp).toLocaleTimeString()}
+                </div>
+              </div>
+            ))
+          )}
         </div>
       </div>
-      <div className="mat-upper">
-        <div className="mat-zone">
-          <DeckStack
-            label="Deck"
-            count={playerDeckOrder.length}
-            owner="self"
-            drawAnimations={playerDrawAnimations}
-            onAnimationComplete={handleDrawAnimationComplete}
+      <div className="chat-panel">
+        <h4>Match Chat</h4>
+        <div className="chat-panel__messages">
+          {chatMessages.length === 0 ? (
+            <div className="chat-panel__empty">No messages yet.</div>
+          ) : (
+            chatMessages.map((entry) => (
+              <div
+                key={entry.id}
+                className={[
+                  'chat-message',
+                  entry.optimistic ? 'chat-message--pending' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+              >
+                <div className="chat-message__meta">
+                  <span className="chat-message__author">
+                    {entry.playerName ?? resolvePlayerLabel(entry.playerId, 'Unknown duelist')}
+                  </span>
+                  <span className="chat-message__timestamp">
+                    {new Date(entry.timestamp).toLocaleTimeString()}
+                  </span>
+                </div>
+                <div className="chat-message__body">{entry.message}</div>
+                {entry.optimistic ? (
+                  <div className="chat-message__pending">Delivering…</div>
+                ) : null}
+              </div>
+            ))
+          )}
+        </div>
+        <form className="chat-panel__form" onSubmit={handleChatSubmit}>
+          <input
+            type="text"
+            className="chat-panel__input"
+            value={chatInput}
+            onChange={(event) => setChatInput(event.target.value)}
+            placeholder="Send a message…"
           />
-        </div>
-        <div className="mat-zone">
-          <RuneGrid title="Runes" slots={playerRunes} />
-        </div>
-        <div className="mat-zone champion-stack">
-          <CardTile card={legendCard} label="Legend" />
-          <CardTile card={leaderCard} label="Leader" />
-        </div>
-        <div className="mat-zone">
-          <GraveyardPile cards={playerGraveyard} />
-        </div>
+          <button
+            type="submit"
+            className="chat-panel__send"
+            disabled={chatInput.trim().length === 0}
+          >
+            Send
+          </button>
+        </form>
       </div>
-      <div className="mat-center">
-        <BoardGrid
-          board={playerFrontlineBoard}
-          excludeIds={exclusionSet}
-          onCardSelect={canAct ? handleSelectUnit : undefined}
-          selectableFilter={(card) => card.type === 'CREATURE'}
-          selectedCardId={selectedUnit}
-        />
-      </div>
-      <div className="mat-lower">
-        <BaseGrid
-          title="Base"
-          cards={playerBaseUnits}
-          onCardSelect={canAct ? handleSelectUnit : undefined}
-          selectable={canAct}
-          selectedCardId={selectedUnit}
-        />
-        <HandRow
-          isSelf
-          cards={currentPlayer.hand}
-          handSize={currentPlayer.hand.length}
-          onCardClick={handleHandCardClick}
-          mulliganSelection={mulliganSelection}
-          canInteract={handInteractable}
-          idleLabel="Draw cards or await next phase"
-        />
-      </div>
-    </section>
+    </aside>
   );
 
   const boardView = (
     <>
-      <div className="status-bar">
-        <div>
-          <strong>Match:</strong> {matchId}
-        </div>
-        <div>
-          <strong>Status:</strong> {friendlyStatus(matchStatus)}
-        </div>
-        <div>
-          <strong>Phase:</strong> {flow?.currentPhase ?? 'Unknown'}
-        </div>
-        <div>
-          <strong>Turn:</strong> {flow?.turnNumber ?? spectatorState.turnNumber}
-        </div>
-        <div className="priority-pill">
-          {priorityWindow
-            ? priorityWindow.holder === playerId
-              ? 'You have priority'
-              : 'Awaiting opponent priority'
-            : 'Priority open'}
-        </div>
-        <div className="control-buttons">
-          <button
-            className="primary"
-            onClick={handleNextPhase}
-            disabled={!canAct || advancingPhase || matchStatus !== 'IN_PROGRESS'}
-          >
-            {advancingPhase ? 'Advancing…' : 'End Phase'}
-          </button>
-          <button className="secondary" onClick={handleConcede}>
-            Concede
-          </button>
-        </div>
-      </div>
-      <div className="phase-indicator">
-        {canAct
-          ? 'You currently have priority.'
-          : 'Waiting for opponent or resolving effects.'}
-      </div>
-      {initiativeOutcome && initiativeWinnerDisplay && (
-        <div className="initiative-banner">
-          <strong>{`${initiativeWinnerDisplay} won the initiative duel.`}</strong>
-          <span>
-            {initiativeOutcome.winnerIsSelf
-              ? `${initiativeWinnerDisplay} takes the first turn.`
-              : `${initiativeWinnerDisplay} takes the first turn while ${initiativeLoserDisplay} receives the bonus rune channel.`}
-            {initiativeOutcome.winnerChoiceLabel
-              ? ` (${initiativeWinnerDisplay} chose ${initiativeOutcome.winnerChoiceLabel}.)`
-              : null}
-          </span>
-        </div>
-      )}
-      <div className="mat-layout">
-        {opponentMat}
-        <section className="arena-column">
-          <div className="arena-panel battlefield-panel">
-            <h2>Battlefields</h2>
-            <div className="battlefield-row">
-              {battlefields.length === 0 ? (
-                <div className="empty-slot wide">Waiting for battlefield draft...</div>
-              ) : (
-                battlefields.map((field, index) => (
-                  <div className="battlefield-card" key={field.battlefieldId}>
-                    <CardTile
-                      card={snapshotToBaseCard(field.card, {
-                        cardId: field.battlefieldId,
-                        name: field.name,
-                        type: 'Battlefield',
-                      })}
-                      label={`Field ${index + 1}`}
-                    />
-                    <div className="battlefield-meta">
-                      <span>Owner: {resolvePlayerLabel(field.ownerId, 'Unclaimed')}</span>
-                      <span>Controller: {resolvePlayerLabel(field.controller, 'Unclaimed')}</span>
-                      {field.contestedBy.length > 0 && (
-                        <span>
-                          Contested by:{' '}
-                          {field.contestedBy
-                            .map((contender) => resolvePlayerLabel(contender, 'Unknown duelist'))
-                            .join(', ')}
-                        </span>
-                      )}
-                    </div>
-                    {selectedUnit && (
-                      <button
-                        className="prompt-button"
-                        onClick={() => handleMoveSelected(field.battlefieldId)}
-                        disabled={
-                          !canAct ||
-                          movingUnit ||
-                          !selectedUnitCard ||
-                          (selectedUnitCard.location?.zone === 'battlefield' &&
-                            selectedUnitCard.location?.battlefieldId === field.battlefieldId)
-                        }
-                      >
-                        {movingUnit ? 'Moving...' : 'Move Selected Here'}
-                      </button>
-                    )}
-                  </div>
-                ))
-              )}
+      <div className="arena-layout">
+        {championSidebar}
+        <div className="arena-layout__main">
+          {matchInfoPanel}
+          <div className="duel-stage">
+            {renderPlayerZone('opponent')}
+            <div className="arena-divider">
+              {battlefieldStage}
+              {boardPrompts}
             </div>
+            {renderPlayerZone('self')}
           </div>
-          {boardPrompts}
-        </section>
-        {selfMat}
+        </div>
+        {duelLogSidebar}
       </div>
       {selectedUnitCard && (
         <section className="selection-banner">
@@ -2240,868 +4298,85 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           </div>
         </section>
       )}
-      {actionMessage && <div className="message-line">{actionMessage}</div>}
+      {pendingDeploymentCard && pendingDeployment != null && (
+        <div className="deploy-overlay">
+          <div className="deploy-modal">
+            <h4>Deploy {pendingDeploymentCard.name ?? 'Unit'}</h4>
+            <p>Select where you would like to deploy this unit.</p>
+            <div className="deploy-options">
+              <button
+                type="button"
+                className="prompt-button secondary"
+                onClick={() => {
+                  void handlePlayCard(pendingDeployment, null, {
+                    animateKey: pendingDeploymentKey,
+                  });
+                  setPendingDeployment(null);
+                }}
+              >
+                Base
+              </button>
+              {controlledBattlefields.map((field) => (
+                  <button
+                    type="button"
+                    key={field.battlefieldId}
+                    className="prompt-button primary"
+                    onClick={() => {
+                      void handlePlayCard(pendingDeployment, field.battlefieldId, {
+                        animateKey: pendingDeploymentKey,
+                      });
+                      setPendingDeployment(null);
+                    }}
+                  >
+                    {field.name}
+                  </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              className="prompt-button danger"
+              onClick={() => setPendingDeployment(null)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      {actionMessage && (
+        <AnnouncementModal
+          message={actionMessage}
+          onClose={() => setActionMessage(null)}
+        />
+      )}
     </>
   );
 
+  const boardModeClass = showInitiativeScreen
+    ? 'duel-mode'
+    : showBattlefieldScreen
+      ? 'battlefield-mode'
+      : 'board-mode';
+  const activeView = showInitiativeScreen
+    ? initiativeView
+    : showBattlefieldScreen
+      ? battlefieldView
+      : boardView;
+
   return (
-    <div className={`game-board ${showInitiativeScreen ? 'duel-mode' : 'board-mode'}`}>
-      {showInitiativeScreen ? initiativeView : boardView}
-      <style jsx>{`
-
-        .game-board {
-          min-height: 100vh;
-          background: radial-gradient(circle at top, #1e2761, #0d101d 70%);
-          color: #e2e8f0;
-          padding: 24px;
-          display: flex;
-          flex-direction: column;
-          gap: 20px;
-        }
-
-        .status-bar {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-          gap: 12px;
-          align-items: center;
-          padding: 14px 18px;
-          border: 1px solid rgba(148, 163, 184, 0.4);
-          border-radius: 12px;
-          background: rgba(15, 23, 42, 0.85);
-        }
-
-        .control-buttons {
-          display: flex;
-          gap: 10px;
-          justify-content: flex-end;
-          flex-wrap: wrap;
-        }
-
-        .priority-pill {
-          margin-left: auto;
-          background: rgba(59, 130, 246, 0.2);
-          border: 1px solid rgba(59, 130, 246, 0.6);
-          padding: 4px 10px;
-          border-radius: 999px;
-          font-weight: 600;
-        }
-
-        .prompt-panel {
-          display: flex;
-          gap: 16px;
-          flex-wrap: wrap;
-        }
-
-        .board-prompts {
-          margin-top: -4px;
-        }
-
-        .prompt-card {
-          flex: 1;
-          min-width: 240px;
-          border: 1px solid rgba(148, 163, 184, 0.4);
-          border-radius: 10px;
-          background: rgba(15, 23, 42, 0.75);
-          padding: 16px;
-        }
-
-        .prompt-card.muted {
-          opacity: 0.8;
-        }
-
-        .battlefield-prompt {
-          display: flex;
-          flex-direction: column;
-          gap: 16px;
-        }
-
-        .prompt-title {
-          font-size: 18px;
-          font-weight: 600;
-          margin-bottom: 8px;
-        }
-
-        .prompt-options {
-          display: flex;
-          gap: 10px;
-          flex-wrap: wrap;
-        }
-
-        .battlefield-choice-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-          gap: 16px;
-        }
-
-        .battlefield-choice {
-          border: 1px solid rgba(148, 163, 184, 0.3);
-          border-radius: 12px;
-          background: rgba(15, 23, 42, 0.65);
-          padding: 10px;
-          cursor: pointer;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-          transition: transform 0.2s ease, border-color 0.2s ease;
-        }
-
-        .battlefield-choice:hover:not(:disabled) {
-          border-color: rgba(34, 197, 94, 0.7);
-          transform: translateY(-3px);
-        }
-
-        .battlefield-choice:disabled {
-          opacity: 0.6;
-          cursor: not-allowed;
-        }
-
-        .choice-note {
-          font-size: 12px;
-          color: rgba(226, 232, 240, 0.75);
-          text-align: center;
-        }
-
-        .muted-text {
-          color: rgba(226, 232, 240, 0.6);
-          font-style: italic;
-        }
-
-        .prompt-button {
-          padding: 8px 12px;
-          border-radius: 8px;
-          border: 1px solid rgba(226, 232, 240, 0.4);
-          background: rgba(148, 163, 184, 0.2);
-          color: inherit;
-          cursor: pointer;
-          transition: background 0.2s, color 0.2s, transform 0.2s;
-        }
-
-        .prompt-button.primary {
-          border-color: rgba(34, 197, 94, 0.6);
-          background: rgba(34, 197, 94, 0.15);
-        }
-
-        .prompt-button:hover:not(:disabled) {
-          transform: translateY(-2px);
-        }
-
-        .prompt-button:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
-
-        .prompt-actions {
-          display: flex;
-          gap: 12px;
-          align-items: center;
-          margin-top: 8px;
-        }
-
-        .initiative-help {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-          justify-content: space-between;
-          border: 1px solid rgba(148, 163, 184, 0.4);
-          border-radius: 10px;
-          padding: 10px 14px;
-          background: rgba(15, 23, 42, 0.65);
-          font-weight: 600;
-        }
-
-        .tie-callout {
-          margin: 10px 0;
-          padding: 10px 14px;
-          border-radius: 10px;
-          border: 1px solid rgba(251, 191, 36, 0.6);
-          background: rgba(245, 158, 11, 0.1);
-          color: #fcd34d;
-        }
-
-        .initiative-grid {
-          display: flex;
-          gap: 16px;
-          flex-wrap: wrap;
-          justify-content: center;
-        }
-
-        .initiative-grid--full {
-          width: 100%;
-        }
-
-        .initiative-button {
-          flex: 1;
-          min-width: 240px;
-          border: none;
-          border-radius: 20px;
-          background: transparent;
-          color: inherit;
-          cursor: pointer;
-          padding: 6px;
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-          align-items: center;
-          transition: transform 0.2s;
-        }
-
-        .initiative-button:hover:not(:disabled) {
-          transform: translateY(-6px);
-        }
-
-        .initiative-button:disabled {
-          opacity: 0.6;
-          cursor: not-allowed;
-        }
-
-        .initiative-button--selected {
-          transform: translateY(-6px);
-        }
-
-        .initiative-button--selected .initiative-art {
-          border-color: rgba(34, 197, 94, 0.9);
-          box-shadow: 0 16px 35px rgba(34, 197, 94, 0.25);
-        }
-
-        .initiative-art {
-          width: 200px;
-          height: 200px;
-          border-radius: 28px;
-          object-fit: cover;
-          border: 3px solid rgba(148, 163, 184, 0.45);
-          background: rgba(2, 6, 23, 0.92);
-          box-shadow: 0 12px 35px rgba(5, 10, 25, 0.65);
-        }
-
-        .selected-artifacts {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 16px;
-          margin: 16px 0;
-          justify-content: center;
-          align-items: flex-start;
-        }
-
-        .artifact-panel {
-          flex: 1;
-          min-width: 200px;
-          border: 1px solid rgba(148, 163, 184, 0.35);
-          border-radius: 12px;
-          padding: 12px;
-          background: rgba(15, 23, 42, 0.6);
-        }
-
-        .artifact-card {
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          gap: 8px;
-          padding: 10px;
-        }
-
-        .artifact-card img {
-          border-radius: 12px;
-          box-shadow: 0 10px 20px rgba(0, 0, 0, 0.35);
-        }
-
-        .artifact-card.opponent img {
-          border-color: rgba(248, 113, 113, 0.6);
-        }
-
-        .artifact-placeholder {
-          min-height: 120px;
-          border: 1px dashed rgba(148, 163, 184, 0.3);
-          border-radius: 10px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          text-align: center;
-          padding: 12px;
-          color: rgba(226, 232, 240, 0.75);
-          font-size: 14px;
-        }
-
-        .phase-progress {
-          margin-top: 12px;
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          justify-content: center;
-          font-size: 14px;
-          color: rgba(226, 232, 240, 0.85);
-        }
-
-        .phase-spinner {
-          width: 18px;
-          height: 18px;
-          border: 2px solid rgba(148, 163, 184, 0.5);
-          border-top-color: rgba(34, 197, 94, 0.9);
-          border-radius: 50%;
-          animation: spin 0.9s linear infinite;
-        }
-
-        .phase-indicator {
-          text-align: center;
-          border: 1px solid rgba(148, 163, 184, 0.3);
-          border-radius: 8px;
-          padding: 8px 12px;
-          background: rgba(15, 23, 42, 0.7);
-          font-size: 14px;
-        }
-
-        .initiative-banner {
-          margin: 0.85rem 0;
-          padding: 0.85rem 1.1rem;
-          border-radius: 10px;
-          border: 1px solid rgba(34, 197, 94, 0.45);
-          background: rgba(16, 185, 129, 0.12);
-          display: flex;
-          flex-direction: column;
-          gap: 0.2rem;
-        }
-
-        .initiative-banner strong {
-          font-size: 0.95rem;
-        }
-
-        .initiative-banner span {
-          font-size: 0.85rem;
-          color: rgba(226, 232, 240, 0.9);
-        }
-
-        .board-layout {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-          gap: 20px;
-          align-items: flex-start;
-        }
-
-        .player-panel {
-          border: 1px solid rgba(148, 163, 184, 0.35);
-          border-radius: 14px;
-          padding: 16px;
-          background: rgba(15, 23, 42, 0.85);
-          box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25);
-          display: flex;
-          flex-direction: column;
-          gap: 14px;
-          min-height: 100%;
-        }
-
-        .panel-header {
-          display: flex;
-          justify-content: space-between;
-          flex-wrap: wrap;
-          gap: 12px;
-        }
-
-        .score-pill {
-          margin-top: 4px;
-          display: inline-flex;
-          align-items: center;
-          gap: 6px;
-          border-radius: 999px;
-          padding: 4px 12px;
-          border: 1px solid rgba(226, 232, 240, 0.4);
-          background: rgba(226, 232, 240, 0.08);
-        }
-
-        .resource-block {
-          display: flex;
-          gap: 10px;
-          flex-wrap: wrap;
-          font-size: 14px;
-        }
-
-        .player-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-          gap: 12px;
-        }
-
-        .section-title {
-          font-size: 14px;
-          font-weight: 600;
-          text-transform: uppercase;
-          letter-spacing: 0.04em;
-          margin-bottom: 6px;
-          color: rgba(226, 232, 240, 0.8);
-        }
-
-        .deck-stack {
-          border: 1px dashed rgba(148, 163, 184, 0.4);
-          border-radius: 10px;
-          padding: 12px;
-          background: rgba(15, 23, 42, 0.6);
-        }
-
-        .deck-stack__pile {
-          position: relative;
-          min-height: 110px;
-        }
-
-        .deck-card-back,
-        .card-back {
-          width: 64px;
-          height: 90px;
-          border-radius: 8px;
-          background: linear-gradient(135deg, rgba(94, 234, 212, 0.5), rgba(59, 130, 246, 0.5));
-          border: 1px solid rgba(226, 232, 240, 0.3);
-          box-shadow: 0 6px 12px rgba(0, 0, 0, 0.3);
-        }
-
-        .deck-count {
-          margin-top: 8px;
-          font-size: 13px;
-          color: rgba(226, 232, 240, 0.75);
-        }
-
-        .card-draw-animation {
-          position: absolute;
-          top: 0;
-          left: 0;
-          width: 64px;
-          height: 90px;
-          border-radius: 8px;
-          border: 1px solid rgba(226, 232, 240, 0.4);
-          background: rgba(59, 130, 246, 0.4);
-          opacity: 0;
-          pointer-events: none;
-        }
-
-        .card-draw-animation--self {
-          animation: drawCardSelf 0.9s ease-out forwards;
-        }
-
-        .card-draw-animation--opponent {
-          animation: drawCardOpponent 0.9s ease-out forwards;
-        }
-
-        .champion-lineup {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-          gap: 12px;
-        }
-
-        .grid-panel {
-          border: 1px solid rgba(148, 163, 184, 0.4);
-          border-radius: 14px;
-          padding: 16px;
-          background: rgba(15, 23, 42, 0.85);
-        }
-
-        .battlefield-zone h2 {
-          margin-bottom: 12px;
-        }
-
-        .battlefield-row {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-        }
-
-        .battlefield-card {
-          border: 1px dashed rgba(148, 163, 184, 0.4);
-          border-radius: 12px;
-          padding: 12px;
-          background: rgba(15, 23, 42, 0.65);
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        }
-
-        .battlefield-status-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-          gap: 12px;
-        }
-
-        .selection-pill {
-          border: 1px solid rgba(148, 163, 184, 0.3);
-          border-radius: 10px;
-          padding: 10px;
-          background: rgba(15, 23, 42, 0.55);
-          display: flex;
-          flex-direction: column;
-          gap: 6px;
-        }
-
-        .selection-pill--self {
-          border-color: rgba(34, 197, 94, 0.4);
-          background: rgba(22, 163, 74, 0.08);
-        }
-
-        .selection-pill--ready {
-          box-shadow: 0 0 12px rgba(34, 197, 94, 0.4);
-        }
-
-        .pill-header {
-          display: flex;
-          flex-direction: column;
-          gap: 2px;
-        }
-
-        .pill-player {
-          font-weight: 600;
-        }
-
-        .pill-status {
-          font-size: 12px;
-          color: rgba(226, 232, 240, 0.7);
-        }
-
-        .selection-card {
-          display: flex;
-          justify-content: center;
-        }
-
-        .selection-card .card-tile {
-          width: 90px;
-          height: 130px;
-        }
-
-        .pill-empty {
-          font-size: 12px;
-          color: rgba(226, 232, 240, 0.6);
-        }
-
-        .battlefield-progress {
-          padding: 8px 12px;
-          border-radius: 8px;
-          border: 1px dashed rgba(148, 163, 184, 0.4);
-          font-size: 13px;
-          text-align: center;
-          color: rgba(226, 232, 240, 0.8);
-        }
-
-        .battlefield-progress--ready {
-          border-style: solid;
-          border-color: rgba(34, 197, 94, 0.6);
-          background: rgba(34, 197, 94, 0.08);
-          color: rgba(16, 185, 129, 0.9);
-        }
-
-        .battlefield-meta {
-          font-size: 12px;
-          color: rgba(226, 232, 240, 0.8);
-          display: flex;
-          flex-direction: column;
-          gap: 2px;
-        }
-
-        .board-columns {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-          gap: 12px;
-        }
-
-        .board-column {
-          border: 1px dashed rgba(148, 163, 184, 0.3);
-          border-radius: 10px;
-          padding: 10px;
-          background: rgba(15, 23, 42, 0.6);
-        }
-
-        .column-title {
-          font-weight: 600;
-          margin-bottom: 6px;
-        }
-
-        .card-row {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-          min-height: 96px;
-        }
-
-        .empty-slot {
-          flex: 1;
-          min-height: 80px;
-          border: 1px dashed rgba(148, 163, 184, 0.4);
-          border-radius: 8px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          color: rgba(226, 232, 240, 0.7);
-        }
-
-        .empty-slot.wide {
-          min-height: 100px;
-        }
-
-        .card-tile {
-          position: relative;
-          border: 1px solid rgba(148, 163, 184, 0.5);
-          border-radius: 12px;
-          overflow: hidden;
-          width: 140px;
-          height: 196px;
-          background: rgba(15, 23, 42, 0.7);
-          transition: transform 0.3s ease, box-shadow 0.3s ease;
-          animation: cardFloat 14s ease-in-out infinite;
-        }
-
-        .card-tile--compact {
-          width: 100px;
-          height: 140px;
-        }
-
-        .card-tile--selectable {
-          cursor: pointer;
-        }
-
-        .card-tile--selectable:hover {
-          transform: translateY(-6px) scale(1.02);
-          box-shadow: 0 12px 20px rgba(0, 0, 0, 0.35);
-        }
-
-        .card-tile--selected {
-          box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.8);
-        }
-
-        .card-tile--tapped {
-          filter: grayscale(0.6);
-          opacity: 0.8;
-        }
-
-        .card-image {
-          width: 100%;
-          height: 100%;
-          background-size: cover;
-          background-position: center;
-        }
-
-        .card-placeholder {
-          height: 100%;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 12px;
-          text-align: center;
-          font-size: 13px;
-        }
-
-        .card-label {
-          position: absolute;
-          bottom: 6px;
-          left: 6px;
-          right: 6px;
-          padding: 4px 6px;
-          border-radius: 6px;
-          background: rgba(2, 6, 23, 0.65);
-          font-size: 12px;
-          text-align: center;
-        }
-
-        .card-cost {
-          position: absolute;
-          top: 6px;
-          left: 6px;
-          background: rgba(15, 23, 42, 0.85);
-          border-radius: 6px;
-          padding: 4px 6px;
-          font-weight: 600;
-        }
-
-        .card-stats {
-          position: absolute;
-          top: 6px;
-          right: 6px;
-          background: rgba(15, 23, 42, 0.85);
-          border-radius: 6px;
-          padding: 4px 6px;
-          font-weight: 600;
-        }
-
-        .rune-section {
-          border: 1px solid rgba(148, 163, 184, 0.4);
-          border-radius: 10px;
-          padding: 10px;
-          background: rgba(15, 23, 42, 0.6);
-        }
-
-        .rune-grid {
-          display: grid;
-          grid-template-columns: repeat(4, minmax(0, 1fr));
-          gap: 8px;
-        }
-
-        .rune-grid--compact {
-          grid-template-columns: repeat(3, minmax(0, 1fr));
-        }
-
-        .rune-cell {
-          border: 1px dashed rgba(148, 163, 184, 0.4);
-          border-radius: 8px;
-          min-height: 70px;
-          padding: 6px;
-          font-size: 11px;
-          display: flex;
-          flex-direction: column;
-          justify-content: center;
-          align-items: center;
-          text-align: center;
-        }
-
-        .rune-cell.filled {
-          border-style: solid;
-        }
-
-        .rune-cell--tapped {
-          opacity: 0.6;
-        }
-
-        .graveyard-pile {
-          border: 1px solid rgba(148, 163, 184, 0.4);
-          border-radius: 10px;
-          padding: 10px;
-          background: rgba(15, 23, 42, 0.6);
-        }
-
-        .graveyard-cards {
-          display: flex;
-          gap: 8px;
-        }
-
-        .hand-row {
-          border: 1px solid rgba(148, 163, 184, 0.35);
-          border-radius: 12px;
-          padding: 12px;
-          background: rgba(15, 23, 42, 0.55);
-        }
-
-        .hand-cards {
-          display: flex;
-          gap: 10px;
-          flex-wrap: wrap;
-        }
-
-        .hand-card {
-          cursor: default;
-          transition: transform 0.25s ease, filter 0.2s ease;
-        }
-
-        .hand-card--active {
-          cursor: pointer;
-        }
-
-        .hand-card--active:hover {
-          transform: translateY(-6px);
-        }
-
-        .hand-card.selected .card-tile {
-          box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.9);
-        }
-
-        .selection-banner {
-          border: 1px solid rgba(148, 163, 184, 0.4);
-          border-radius: 10px;
-          padding: 12px;
-          background: rgba(2, 6, 23, 0.7);
-          display: flex;
-          justify-content: space-between;
-          flex-wrap: wrap;
-          gap: 12px;
-        }
-
-        .selection-actions {
-          display: flex;
-          gap: 10px;
-          flex-wrap: wrap;
-        }
-
-        .message-line {
-          margin-top: 8px;
-          text-align: center;
-          font-size: 14px;
-          color: rgba(226, 232, 240, 0.85);
-        }
-
-        .initiative-screen {
-          border: 1px solid rgba(148, 163, 184, 0.35);
-          border-radius: 16px;
-          padding: 24px;
-          background: rgba(9, 9, 22, 0.85);
-          box-shadow: 0 30px 60px rgba(0, 0, 0, 0.45);
-          display: flex;
-          flex-direction: column;
-          gap: 16px;
-        }
-
-        .duel-intro {
-          text-align: center;
-          max-width: 560px;
-          margin: 0 auto;
-        }
-
-        .duel-status-row {
-          display: flex;
-          gap: 16px;
-          flex-wrap: wrap;
-          justify-content: center;
-        }
-
-        .duel-player-card {
-          border: 1px solid rgba(148, 163, 184, 0.35);
-          border-radius: 10px;
-          padding: 12px 16px;
-          min-width: 200px;
-          background: rgba(15, 23, 42, 0.7);
-        }
-
-        @keyframes cardFloat {
-          0% {
-            transform: translateY(0px);
-          }
-          50% {
-            transform: translateY(-6px);
-          }
-          100% {
-            transform: translateY(0px);
-          }
-        }
-
-        @keyframes drawCardSelf {
-          0% {
-            opacity: 0;
-            transform: translate(-10px, 20px) scale(0.9);
-          }
-          60% {
-            opacity: 1;
-            transform: translate(20px, -30px) scale(1);
-          }
-          100% {
-            opacity: 0;
-            transform: translate(160px, -80px) scale(0.9);
-          }
-        }
-
-        @keyframes drawCardOpponent {
-          0% {
-            opacity: 0;
-            transform: translate(10px, -20px) scale(0.9);
-          }
-          60% {
-            opacity: 1;
-            transform: translate(-20px, 20px) scale(1);
-          }
-          100% {
-            opacity: 0;
-            transform: translate(-140px, 60px) scale(0.95);
-          }
-        }
-
-        @keyframes spin {
-          0% {
-            transform: rotate(0deg);
-          }
-          100% {
-            transform: rotate(360deg);
-          }
-        }
-      `}</style>
+    <div className={`game-board ${boardModeClass}`}>
+      {activeView}
+      {showMulliganModal && (
+        <MulliganModal
+          cards={currentPlayer.hand}
+          selection={mulliganSelection}
+          limit={mulliganLimit}
+          loading={submittingMulligan}
+          waitingMessage={mulliganWaitingMessage}
+          onToggle={toggleMulliganSelection}
+          onConfirm={handleConfirmMulligan}
+          onSkip={handleKeepHand}
+        />
+      )}
     </div>
   );
 }
-
-export default GameBoard;

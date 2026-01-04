@@ -2,12 +2,8 @@
 
 import { useEffect, useMemo } from 'react'
 import { usePathname, useSearchParams } from 'next/navigation'
-import Header from '@/components/Header'
-import Footer from '@/components/Footer'
 import RequireAuth from '@/components/auth/RequireAuth'
 import GameBoard from '@/components/GameBoard'
-import LoadingSpinner from '@/components/ui/LoadingSpinner'
-import Link from 'next/link'
 import { useAuth } from '@/hooks/useAuth'
 
 export default function GamePage() {
@@ -50,40 +46,20 @@ function GamePageContent() {
 
   if (!matchId || !user?.userId) {
     return (
-      <>
-        <Header />
-        <main className="game-screen container">
-          <div className="queue-waiting" aria-live="polite">
-            <LoadingSpinner size="sm" label="Awaiting match context" />
-            <span>
-              Waiting for a match assignment. Join the queue to start a duel or open an
-              existing arena link.
-            </span>
-          </div>
-        </main>
-        <Footer />
-      </>
+      <main className="game-screen container">
+        <div className="queue-waiting" aria-live="polite">
+          <strong>Awaiting match context…</strong>
+          <span>Join the queue or open an existing arena link to start a duel.</span>
+        </div>
+      </main>
     )
   }
 
   return (
-    <>
-      <Header />
-      <main className="game-screen container">
-        <div className="game-screen__toolbar">
-          <div>
-            <p className="muted small">Match #{matchId}</p>
-            <h2>Arena Engagement</h2>
-          </div>
-          <Link href="/matchmaking" className="btn secondary">
-            Back to Matchmaking
-          </Link>
-        </div>
-        <div className="game-screen__board">
-          <GameBoard matchId={matchId} playerId={user.userId} />
-        </div>
-      </main>
-      <Footer />
-    </>
+    <main className="game-screen container">
+      <div className="game-screen__board">
+        <GameBoard matchId={matchId} playerId={user.userId} />
+      </div>
+    </main>
   )
 }

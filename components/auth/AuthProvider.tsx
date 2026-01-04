@@ -3,6 +3,7 @@
 import { createContext, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { API_BASE_URL } from '@/lib/apiConfig'
+import { subscribeToAuthInvalidation } from '@/lib/authEvents'
 
 export interface AuthSession {
   userId: string
@@ -36,6 +37,7 @@ interface RefreshResponse {
 
 interface AuthContextValue {
   user: AuthSession | null
+  hydrated: boolean
   signIn: (email: string, password: string) => Promise<void>
   signUp: (params: { email: string; password: string; username: string }) => Promise<string>
   refreshSession: () => Promise<void>
@@ -137,6 +139,7 @@ export const AuthContext = createContext<AuthContextValue | undefined>(undefined
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthSession | null>(null)
+  const [hydrated, setHydrated] = useState(false)
   const refreshTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
   const router = useRouter()
   const expiryWatcher = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -164,30 +167,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (typeof window === 'undefined') {
-      return
-    }
-    const stored = window.localStorage.getItem(STORAGE_KEY)
-    if (!stored) {
+      setHydrated(true)
       return
     }
     try {
-      const parsed = JSON.parse(stored) as AuthSession
-      if (parsed?.userId && parsed?.refreshToken) {
-        const normalized: AuthSession = {
-          ...parsed,
-          expiresAt: clampExpiry(parsed.expiresAt ?? null)
-        }
-        if (hasExpired(normalized.expiresAt)) {
+      const stored = window.localStorage.getItem(STORAGE_KEY)
+      if (stored) {
+        const parsed = JSON.parse(stored) as AuthSession
+        if (parsed?.userId && parsed?.refreshToken) {
+          const normalized: AuthSession = {
+            ...parsed,
+            expiresAt: clampExpiry(parsed.expiresAt ?? null)
+          }
+          if (hasExpired(normalized.expiresAt)) {
+            window.localStorage.removeItem(STORAGE_KEY)
+            redirectToSignIn()
+          } else {
+            setUser(normalized)
+          }
+        } else {
           window.localStorage.removeItem(STORAGE_KEY)
-          redirectToSignIn()
-          return
         }
-        setUser(normalized)
-      } else {
-        window.localStorage.removeItem(STORAGE_KEY)
       }
     } catch {
       window.localStorage.removeItem(STORAGE_KEY)
+    } finally {
+      setHydrated(true)
     }
   }, [redirectToSignIn])
 
@@ -289,15 +294,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [user, handleSessionExpired])
 
+  useEffect(() => {
+    const unsubscribe = subscribeToAuthInvalidation(() => {
+      handleSessionExpired()
+    })
+    return () => {
+      unsubscribe()
+    }
+  }, [handleSessionExpired])
+
   const value = useMemo(
     () => ({
       user,
+      hydrated,
       signIn,
       signUp,
       refreshSession,
       logout,
     }),
-    [user, signIn, signUp, refreshSession, logout]
+    [user, hydrated, signIn, signUp, refreshSession, logout]
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

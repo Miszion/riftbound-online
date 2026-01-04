@@ -54,6 +54,21 @@ export const GAME_STATE_CHANGED = gql`
       battlefields {
         ...BattlefieldStateFields
       }
+      duelLog {
+        id
+        message
+        tone
+        playerId
+        actorName
+        timestamp
+      }
+      chatLog {
+        id
+        playerId
+        playerName
+        message
+        timestamp
+      }
     }
   }
 `;

@@ -8,6 +8,7 @@ export const CARD_STATE_FIELDS = gql`
     type
     rarity
     cost
+    powerCost
     power
     toughness
     currentToughness
@@ -75,6 +76,7 @@ export const PLAYER_BOARD_FIELDS = gql`
 export const PLAYER_STATE_FIELDS = gql`
   ${CARD_STATE_FIELDS}
   ${PLAYER_BOARD_FIELDS}
+  ${CARD_SNAPSHOT_FIELDS}
   fragment PlayerStateFields on PlayerState {
     playerId
     name
@@ -103,6 +105,15 @@ export const PLAYER_STATE_FIELDS = gql`
       domain
       energyValue
       powerValue
+      slug
+      assets {
+        remote
+        localPath
+      }
+      isTapped
+      cardSnapshot {
+        ...CardSnapshotFields
+      }
     }
     runeDeck {
       runeId
@@ -110,6 +121,15 @@ export const PLAYER_STATE_FIELDS = gql`
       domain
       energyValue
       powerValue
+      slug
+      assets {
+        remote
+        localPath
+      }
+      isTapped
+      cardSnapshot {
+        ...CardSnapshotFields
+      }
     }
     resources {
       energy
@@ -126,6 +146,12 @@ export const PLAYER_STATE_FIELDS = gql`
         value
       }
     }
+    championLegend {
+      ...CardSnapshotFields
+    }
+    championLeader {
+      ...CardSnapshotFields
+    }
   }
 `
 
@@ -140,6 +166,8 @@ export const BATTLEFIELD_STATE_FIELDS = gql`
     contestedBy
     lastConqueredTurn
     lastHoldTurn
+    lastCombatTurn
+    lastCombatTurn
     card {
       ...CardSnapshotFields
     }

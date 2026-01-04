@@ -13,6 +13,8 @@ import {
   ATTACK,
   MOVE_UNIT,
   NEXT_PHASE,
+  RECORD_DUEL_LOG_ENTRY,
+  SEND_CHAT_MESSAGE,
   REPORT_MATCH_RESULT,
   CONCEDE_MATCH,
   GET_CARD_CATALOG,
@@ -68,6 +70,7 @@ export function useMatch(matchId: string | null) {
   return useQuery(GET_MATCH, {
     variables: { matchId: matchId || '' },
     skip: !matchId,
+    context: { skipNetworkActivity: true },
   });
 }
 
@@ -75,6 +78,7 @@ export function usePlayerMatch(matchId: string | null, playerId: string | null) 
   return useQuery(GET_PLAYER_MATCH, {
     variables: { matchId: matchId || '', playerId: playerId || '' },
     skip: !matchId || !playerId,
+    context: { skipNetworkActivity: true },
   });
 }
 
@@ -82,6 +86,7 @@ export function useMatchHistory(userId: string | null, limit?: number) {
   return useQuery(GET_MATCH_HISTORY, {
     variables: { userId: userId || '', limit },
     skip: !userId,
+    context: { skipNetworkActivity: true },
   });
 }
 
@@ -89,6 +94,7 @@ export function useMatchResult(matchId: string | null) {
   return useQuery(GET_MATCH_RESULT, {
     variables: { matchId: matchId || '' },
     skip: !matchId,
+    context: { skipNetworkActivity: true },
   });
 }
 
@@ -126,6 +132,14 @@ export function useMoveUnit() {
 
 export function useNextPhase() {
   return useMutation(NEXT_PHASE);
+}
+
+export function useRecordDuelLogEntry() {
+  return useMutation(RECORD_DUEL_LOG_ENTRY);
+}
+
+export function useSendChatMessage() {
+  return useMutation(SEND_CHAT_MESSAGE);
 }
 
 export function useReportMatchResult() {

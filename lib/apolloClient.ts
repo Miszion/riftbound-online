@@ -3,8 +3,11 @@ import { setContext } from '@apollo/client/link/context';
 import { GraphQLWsLink } from '@apollo/client/link/subscriptions';
 import { getMainDefinition } from '@apollo/client/utilities';
 import { createClient } from 'graphql-ws';
+import { onError } from '@apollo/client/link/error';
+import type { ServerError } from '@apollo/client/link/utils';
 import { GRAPHQL_HTTP_URL, GRAPHQL_WS_URL } from '@/lib/apiConfig';
 import { networkActivity } from '@/lib/networkActivity';
+import { notifyAuthInvalidation } from '@/lib/authEvents';
 
 interface StoredSession {
   userId?: string;
@@ -39,6 +42,21 @@ const buildAuthHeaders = (session: StoredSession | null): Record<string, string>
 const httpLink = new HttpLink({
   uri: GRAPHQL_HTTP_URL,
   credentials: 'include',
+});
+
+const errorLink = onError(({ graphQLErrors, networkError }) => {
+  const unauthorizedGraphQL = (graphQLErrors ?? []).some((error) => {
+    const code = error.extensions?.code;
+    return code === 'UNAUTHENTICATED' || code === 'FORBIDDEN';
+  });
+  const statusCode =
+    (networkError && typeof (networkError as ServerError).statusCode === 'number'
+      ? (networkError as ServerError).statusCode
+      : null);
+  const unauthorizedStatus = statusCode === 401 || statusCode === 403;
+  if (unauthorizedGraphQL || unauthorizedStatus) {
+    notifyAuthInvalidation();
+  }
 });
 
 const authLink = setContext((_, { headers }) => {
@@ -94,7 +112,7 @@ const activityLink = new ApolloLink((operation, forward) => {
   });
 });
 
-const httpWithActivity = ApolloLink.from([activityLink, authLink, httpLink]);
+const httpWithActivity = ApolloLink.from([errorLink, activityLink, authLink, httpLink]);
 
 // Use wsLink for subscriptions, httpLink for queries and mutations
 const splitLink = split(
