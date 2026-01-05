@@ -9,6 +9,7 @@ import React, {
   ReactNode,
 } from 'react';
 import Image, { StaticImageData } from 'next/image';
+import { useRouter } from 'next/navigation';
 import type { ApolloError } from '@apollo/client';
 import {
   useMatch,
@@ -27,6 +28,8 @@ import {
   usePhaseChangedSubscription,
   useRecordDuelLogEntry,
   useSendChatMessage,
+  usePassPriority,
+  useActivateChampionPower,
 } from '@/hooks/useGraphQL';
 import type { ToastTone } from '@/components/ui/ToastStack';
 import useToasts from '@/hooks/useToasts';
@@ -55,14 +58,22 @@ type BaseCard = {
   keywords?: string[] | null;
   tags?: string[] | null;
   text?: string | null;
+  effect?: string | null;
   isTapped?: boolean | null;
   tapped?: boolean | null;
+  summoned?: boolean | null;
   assets?: CardAsset | null;
   location?: {
     zone: 'base' | 'battlefield';
     battlefieldId?: string | null;
   } | null;
 };
+
+type CardHoverOptions = {
+  displayUntapped?: boolean;
+};
+
+type CardHoverHandler = (card: BaseCard | null, options?: CardHoverOptions) => void;
 
 type RuneState = {
   runeId: string;
@@ -82,6 +93,17 @@ type PlayerBoardState = {
   creatures: BaseCard[];
   artifacts: BaseCard[];
   enchantments: BaseCard[];
+};
+
+type ChampionAbilityStateData = {
+  canActivate: boolean;
+  reason?: string | null;
+  costSummary?: string | null;
+  cost?: {
+    energy?: number | null;
+    runes?: Record<string, number | null> | null;
+    exhausts?: boolean | null;
+  } | null;
 };
 
 type PlayerStateData = {
@@ -107,6 +129,8 @@ type PlayerStateData = {
   };
   championLegend?: CardSnapshotLike | null;
   championLeader?: CardSnapshotLike | null;
+  championLegendState?: ChampionAbilityStateData | null;
+  championLeaderState?: ChampionAbilityStateData | null;
 };
 
 type RecycledRuneEvent = {
@@ -126,6 +150,8 @@ type OpponentSummary = {
   board?: PlayerBoardState | null;
   championLegend?: CardSnapshotLike | null;
   championLeader?: CardSnapshotLike | null;
+  championLegendState?: ChampionAbilityStateData | null;
+  championLeaderState?: ChampionAbilityStateData | null;
 };
 
 type GameStateView = {
@@ -134,6 +160,8 @@ type GameStateView = {
   turnNumber: number;
   currentPlayerIndex: number;
   canAct: boolean;
+  focusPlayerId?: string | null;
+  combatContext?: CombatContextState | null;
 };
 
 type PlayerMatchView = {
@@ -196,6 +224,28 @@ const resolvePositiveNumber = (value: unknown) => {
 };
 
 const isRuneExhausted = (rune: RuneState) => Boolean(rune.isTapped ?? rune.tapped);
+const isTokenCardEntity = (card?: BaseCard | null) =>
+  Boolean(
+    card &&
+      ((card.tags ?? []).some((tag) => tag?.toLowerCase() === 'token') ||
+        /token/i.test(card.name ?? '') ||
+        /token/i.test(card.text ?? ''))
+  );
+const resolveCardEffectText = (card?: BaseCard | null) => {
+  if (!card) {
+    return null;
+  }
+  return card.text ?? card.effect ?? null;
+};
+const normalizeCardType = (card?: BaseCard | null) => (card?.type ?? '').toUpperCase();
+const isCreatureCard = (card?: BaseCard | null) => normalizeCardType(card) === 'CREATURE';
+const isCardAtBase = (card?: BaseCard | null) => {
+  const zone = card?.location?.zone;
+  return !zone || zone === 'base';
+};
+const isCardOnBattlefield = (card?: BaseCard | null) => card?.location?.zone === 'battlefield';
+const filterBaseCards = (cards?: BaseCard[] | null) => (cards ?? []).filter(isCardAtBase);
+const filterBattlefieldCards = (cards?: BaseCard[] | null) => (cards ?? []).filter(isCardOnBattlefield);
 
 const STANDARD_RUNE_DOMAINS = new Set(['fury', 'calm', 'mind', 'body', 'chaos', 'order']);
 
@@ -413,6 +463,18 @@ type PriorityWindow = {
   event?: string | null;
 };
 
+type CombatContextState = {
+  battlefieldId: string;
+  initiatedBy: string;
+  priorityStage: 'action' | 'reaction';
+};
+
+type BattlefieldPresence = {
+  playerId: string;
+  totalMight: number;
+  unitCount: number;
+};
+
 type BattlefieldState = {
   battlefieldId: string;
   slug?: string | null;
@@ -423,7 +485,9 @@ type BattlefieldState = {
   lastConqueredTurn?: number | null;
   lastHoldTurn?: number | null;
   lastCombatTurn?: number | null;
+  lastHoldScoreTurn?: number | null;
   card?: CardSnapshotLike | BaseCard | null;
+  presence?: BattlefieldPresence[] | null;
 };
 
 type BattlefieldPromptOption = {
@@ -484,6 +548,8 @@ type SpectatorGameState = {
   turnNumber: number;
   timestamp?: string | null;
   updatedAt?: string | null;
+  winner?: string | null;
+  endReason?: string | null;
   players: PlayerStateData[];
   prompts: GamePrompt[];
   priorityWindow?: PriorityWindow | null;
@@ -494,6 +560,8 @@ type SpectatorGameState = {
   initiativeDecidedAt?: string | null;
   duelLog?: DuelLogEntry[];
   chatLog?: ChatMessageEntry[];
+  focusPlayerId?: string | null;
+  combatContext?: CombatContextState | null;
 };
 
 interface GameBoardProps {
@@ -548,6 +616,8 @@ const MATCH_INIT_MAX_RETRIES = 20;
 const ARENA_SYNC_INTERVAL_MS = 2500;
 const CARD_ART_CDN = 'https://static.dotgg.gg/riftbound/cards';
 const RUNE_RECYCLE_DURATION_MS = 2600;
+const TOKEN_CARD_ART =
+  'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="400" height="560" viewBox="0 0 400 560"><defs><linearGradient id="tokenGradient" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="%23325675"/><stop offset="100%" stop-color="%2314283c"/></linearGradient></defs><rect width="100%" height="100%" rx="26" fill="url(%23tokenGradient)" stroke="%23fbbf24" stroke-width="6"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-family="Verdana" font-size="64" fill="%23fbbf24" opacity="0.85">TOKEN</text><text x="50%" y="70%" dominant-baseline="middle" text-anchor="middle" font-family="Verdana" font-size="28" fill="%23fcd34d" opacity="0.75">Unit</text></svg>';
 
 const normalizeTone = (value?: string | null): ToastTone => {
   const tone = (value ?? '').toLowerCase();
@@ -670,6 +740,9 @@ const getCardImage = (
     const normalized = assets.localPath.replace(/^\/+/, '');
     return `/${normalized}`;
   }
+  if (isTokenCardEntity(card)) {
+    return TOKEN_CARD_ART;
+  }
   const slug = deriveAssetSlug(card, options?.fallbackId, options?.fallbackName);
   if (slug) {
     return buildCardArtUrl(slug);
@@ -773,6 +846,28 @@ const cardMatchesMarker = (card: BaseCard, marker: string) => {
   );
 };
 
+const cardHasKeyword = (card?: BaseCard | null, keyword?: string | null) => {
+  if (!card || !keyword) {
+    return false;
+  }
+  const normalized = keyword.toLowerCase();
+  return card.keywords?.some((entry) => entry?.toLowerCase() === normalized) ?? false;
+};
+
+const cardSupportsCombatTiming = (
+  card?: BaseCard | null,
+  timing?: 'action' | 'reaction' | null
+) => {
+  if (!card || !timing) {
+    return false;
+  }
+  const normalized = timing === 'reaction' ? 'reaction' : 'action';
+  return (
+    card.keywords?.some((entry) => entry?.toLowerCase().includes(normalized)) ??
+    cardHasKeyword(card, normalized)
+  );
+};
+
 const findCardWithTag = (
   cards: BaseCard[],
   tag: string,
@@ -847,6 +942,7 @@ type CardSnapshotLike = {
   assets?: CardAsset | null;
   isTapped?: boolean | null;
   tapped?: boolean | null;
+  summoned?: boolean | null;
   location?: BaseCard['location'] | null;
 };
 
@@ -862,8 +958,10 @@ const snapshotToBaseCard = (
   rarity: snapshot?.rarity ?? defaults.rarity ?? undefined,
   keywords: snapshot?.keywords ?? defaults.keywords ?? undefined,
   text: snapshot?.effect ?? defaults.text ?? undefined,
+  effect: snapshot?.effect ?? defaults.effect ?? undefined,
   isTapped: snapshot?.isTapped ?? defaults.isTapped ?? null,
   tapped: snapshot?.tapped ?? defaults.tapped ?? null,
+  summoned: snapshot?.summoned ?? defaults.summoned ?? null,
   assets: snapshot?.assets ?? defaults.assets ?? null,
   location: snapshot?.location ?? defaults.location ?? null,
 });
@@ -904,6 +1002,11 @@ interface CardTileProps {
   disabled?: boolean;
   compact?: boolean;
   widthPx?: number;
+  draggable?: boolean;
+  onDragStart?: (event: React.DragEvent<HTMLDivElement>) => void;
+  onDragEnd?: (event: React.DragEvent<HTMLDivElement>) => void;
+  title?: string;
+  onHover?: CardHoverHandler;
 }
 
 const CardTile: React.FC<CardTileProps> = ({
@@ -915,6 +1018,11 @@ const CardTile: React.FC<CardTileProps> = ({
   disabled,
   compact,
   widthPx,
+  draggable,
+  onDragStart,
+  onDragEnd,
+  title,
+  onHover,
 }) => {
   const image = getCardImage(card);
   const rarityColor =
@@ -922,6 +1030,8 @@ const CardTile: React.FC<CardTileProps> = ({
   const statsAvailable =
     card?.power !== undefined && card?.toughness !== undefined;
   const isTapped = Boolean(card?.isTapped ?? card?.tapped);
+  const isTokenCard = isTokenCardEntity(card);
+  const hoverOptions = isTapped ? { displayUntapped: true } : undefined;
   const inlineStyle = useMemo<React.CSSProperties>(() => {
     const style: React.CSSProperties = {
       borderColor: rarityColor,
@@ -950,6 +1060,7 @@ const CardTile: React.FC<CardTileProps> = ({
         selectable ? 'card-tile--selectable' : '',
         isSelected ? 'card-tile--selected' : '',
         isTapped ? 'card-tile--tapped' : '',
+        isTokenCard ? 'card-tile--token' : '',
         !card ? 'card-tile--empty' : '',
         disabled ? 'card-tile--disabled' : '',
       ]
@@ -960,6 +1071,27 @@ const CardTile: React.FC<CardTileProps> = ({
       onKeyDown={handleKeyDown}
       role={onClick ? 'button' : undefined}
       tabIndex={onClick ? 0 : undefined}
+      title={title}
+      draggable={draggable && !disabled}
+      onDragStart={
+        draggable && !disabled
+          ? (event) => {
+              event.dataTransfer.effectAllowed = 'move';
+              onDragStart?.(event);
+            }
+          : undefined
+      }
+      onDragEnd={
+        draggable && !disabled
+          ? (event) => {
+              onDragEnd?.(event);
+            }
+          : undefined
+      }
+      onMouseEnter={() => onHover?.(card ?? null, hoverOptions)}
+      onMouseLeave={() => onHover?.(null)}
+      onFocus={() => onHover?.(card ?? null, hoverOptions)}
+      onBlur={() => onHover?.(null)}
     >
       {image && (
         <div className="card-image">
@@ -1071,6 +1203,11 @@ type BaseGridProps = {
   onCardSelect?: (card: BaseCard) => void;
   selectable?: boolean;
   selectedCardId?: string | null;
+  disableCard?: (card: BaseCard) => boolean;
+  dragEnabled?: (card: BaseCard) => boolean;
+  onCardDragStart?: (card: BaseCard, event: React.DragEvent<HTMLDivElement>) => void;
+  onCardDragEnd?: (card: BaseCard, event: React.DragEvent<HTMLDivElement>) => void;
+  onCardHover?: CardHoverHandler;
 };
 
 const BaseGrid = ({
@@ -1079,6 +1216,11 @@ const BaseGrid = ({
   onCardSelect,
   selectable,
   selectedCardId,
+  disableCard,
+  dragEnabled,
+  onCardDragStart,
+  onCardDragEnd,
+  onCardHover,
 }: BaseGridProps) => (
   <div className="base-grid">
     <div className="section-title">{title}</div>
@@ -1087,6 +1229,8 @@ const BaseGrid = ({
         cards.map((card) => {
           const instanceId = card.instanceId ?? undefined;
           const isSelected = Boolean(instanceId && selectedCardId === instanceId);
+          const isDisabled = Boolean(disableCard?.(card));
+          const canDrag = !isDisabled && (dragEnabled?.(card) ?? false);
           return (
             <CardTile
               key={cardIdValue(card)}
@@ -1094,9 +1238,22 @@ const BaseGrid = ({
               compact
               selectable={selectable}
               isSelected={isSelected}
+              disabled={isDisabled}
               onClick={
-                selectable && onCardSelect ? () => onCardSelect(card) : undefined
+                selectable && onCardSelect && !isDisabled ? () => onCardSelect(card) : undefined
               }
+              draggable={canDrag}
+              onDragStart={
+                canDrag && onCardDragStart
+                  ? (event) => onCardDragStart(card, event)
+                  : undefined
+              }
+              onDragEnd={
+                canDrag && onCardDragEnd
+                  ? (event) => onCardDragEnd(card, event)
+                  : undefined
+              }
+              onHover={onCardHover}
             />
           );
         })
@@ -1123,6 +1280,8 @@ type HandRowProps = {
   cardWidth?: number;
   playableStates?: boolean[];
   playingCardKeys?: Set<string>;
+  focusStates?: ('action' | 'reaction' | null)[];
+  onCardHover?: CardHoverHandler;
 };
 
 const HandRow = ({
@@ -1139,6 +1298,8 @@ const HandRow = ({
   cardWidth = 125,
   playableStates = [],
   playingCardKeys,
+  focusStates = [],
+  onCardHover,
 }: HandRowProps) => {
   const displayHand = isSelf ? cards : [];
   const placeholderCount = isSelf ? 0 : handSize;
@@ -1149,23 +1310,27 @@ const HandRow = ({
           displayHand.length === 0 ? (
             <div className="empty-slot wide">{idleLabel ?? 'No cards in hand'}</div>
           ) : (
-            displayHand.map((card, index) => {
-              const isSelected = mulliganSelection.includes(index);
-              const isPlayable = playableStates[index];
-              const cardKey = resolveHandCardKey(card, index);
-              const isPlaying = playingCardKeys?.has(cardKey) ?? false;
-              return (
-                <div
-                  key={cardKey}
-                  className={[
-                    'hand-card',
-                    isSelected ? 'selected' : '',
-                    canInteract ? 'hand-card--active' : '',
-                    isPlayable ? 'hand-card--playable' : '',
-                    isPlaying ? 'hand-card--playing' : '',
-                  ]
-                    .filter(Boolean)
-                    .join(' ')}
+          displayHand.map((card, index) => {
+            const isSelected = mulliganSelection.includes(index);
+            const isPlayable = playableStates[index];
+            const cardKey = resolveHandCardKey(card, index);
+            const isPlaying = playingCardKeys?.has(cardKey) ?? false;
+            const focusTiming = focusStates?.[index] ?? null;
+            const focusClass = focusTiming ? `hand-card--focus-${focusTiming}` : '';
+            return (
+              <div
+                key={cardKey}
+                className={[
+                  'hand-card',
+                  isSelected ? 'selected' : '',
+                  canInteract ? 'hand-card--active' : '',
+                  isPlayable ? 'hand-card--playable' : '',
+                  isPlaying ? 'hand-card--playing' : '',
+                  focusTiming ? 'hand-card--focus' : '',
+                  focusClass,
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
                   draggable={Boolean(canInteract && onCardClick)}
                   onDragStart={(event) => {
                     if (!canInteract || !onCardClick) {
@@ -1190,7 +1355,20 @@ const HandRow = ({
                     widthPx={cardWidth}
                     selectable={canInteract}
                     isSelected={isSelected}
+                    onHover={onCardHover}
                   />
+                  {focusTiming ? (
+                    <span
+                      className={[
+                        'hand-card__focus-badge',
+                        `hand-card__focus-badge--${focusTiming}`,
+                      ]
+                        .filter(Boolean)
+                        .join(' ')}
+                    >
+                      {focusTiming === 'reaction' ? 'Reaction' : 'Action'}
+                    </span>
+                  ) : null}
                 </div>
               );
             })
@@ -1237,9 +1415,11 @@ const resolveRuneArt = (rune: RuneState) => {
 const RuneTokens = ({
   runes,
   optimisticTaps,
+  onHover,
 }: {
   runes: RuneState[];
   optimisticTaps?: Set<string>;
+  onHover?: CardHoverHandler;
 }) => {
   if (!runes.length) {
     return <div className="rune-token-strip rune-token-strip--empty" aria-hidden="true" />;
@@ -1247,7 +1427,7 @@ const RuneTokens = ({
   return (
     <div className="rune-token-strip">
       {runes.map((rune, index) => {
-        const { art } = resolveRuneArt(rune);
+        const { art, card } = resolveRuneArt(rune);
         const instanceKey = runeInstanceKey(rune, index) ?? `${index}-${rune.runeId ?? rune.slug ?? 'rune'}`;
         const exhausted =
           Boolean(rune.isTapped ?? rune.tapped) || (instanceKey ? optimisticTaps?.has(instanceKey) : false);
@@ -1263,6 +1443,8 @@ const RuneTokens = ({
             key={`${instanceKey}-${index}`}
             style={{ zIndex: runes.length - index }}
             title={title}
+            onMouseEnter={() => onHover?.(card)}
+            onMouseLeave={() => onHover?.(null)}
           >
             <div className="rune-token__art-wrapper">
               {art ? (
@@ -1282,10 +1464,7 @@ const RuneTokens = ({
               )}
             </div>
             <div className="rune-token__meta">
-              <span className="rune-token__name">{rune.name}</span>
-              <span className="rune-token__domain">
-                {rune.domain ?? '—'} · E{rune.energyValue ?? 0}/P{rune.powerValue ?? 0}
-              </span>
+              <span className="rune-token__name">{rune.name.split(' ')[0]}</span>
             </div>
           </div>
         );
@@ -1294,16 +1473,27 @@ const RuneTokens = ({
   );
 };
 
-const RuneRecycleLayer = ({ events }: { events: RecycledRuneEvent[] }) => {
+const RuneRecycleLayer = ({
+  events,
+  onHover,
+}: {
+  events: RecycledRuneEvent[];
+  onHover?: CardHoverHandler;
+}) => {
   if (!events.length) {
     return null;
   }
   return (
     <div className="rune-recycle-layer" aria-hidden="true">
       {events.map((event) => {
-        const { art } = resolveRuneArt(event.rune);
+        const { art, card } = resolveRuneArt(event.rune);
         return (
-          <div key={event.id} className="rune-recycle-token">
+          <div
+            key={event.id}
+            className="rune-recycle-token"
+            onMouseEnter={() => onHover?.(card)}
+            onMouseLeave={() => onHover?.(null)}
+          >
             <div className="rune-recycle-token__art-wrapper">
               {art ? (
                 <img
@@ -1358,22 +1548,39 @@ const CardBackStack = ({
   );
 };
 
-const HiddenHand = ({ count }: { count: number }) => {
-  const displayCount = Math.max(count, 4);
+type HiddenHandProps = {
+  count: number;
+};
+
+const HiddenHand = ({ count }: HiddenHandProps) => {
+  const constrainedCount = Math.max(count, 0);
+  const maxVisible = 7;
+  const displayCount = Math.min(Math.max(constrainedCount, 1), maxVisible);
+  const overflowCount = Math.max(constrainedCount - maxVisible, 0);
   return (
-      <div className="hidden-hand__cards">
+    <div className="hidden-hand hidden-hand--compact" aria-label="Opponent hand">
+      <span className="hidden-hand__count hidden-hand__count--top">
+        {count} card{count === 1 ? '' : 's'}
+      </span>
+      <div className="hidden-hand__cards hidden-hand__cards--compact">
         {Array.from({ length: displayCount }).map((_, index) => (
           <Image
             key={`hidden-hand-${index}`}
             src={cardBackImg}
             alt="Hidden card"
-            width={125}
-            height={185}
+            width={56}
+            height={84}
             draggable={false}
-            className="hidden-hand__card"
+            className="hidden-hand__card hidden-hand__card--compact"
           />
         ))}
+        {overflowCount > 0 ? (
+          <div className="hidden-hand__card hidden-hand__card--compact hidden-hand__card--overflow">
+            +{overflowCount}
+          </div>
+        ) : null}
       </div>
+    </div>
   );
 };
 
@@ -1400,7 +1607,6 @@ const MulliganModal = ({
 }: MulliganModalProps) => (
   <div className="modal-backdrop">
     <div className="mulligan-modal" role="dialog" aria-modal="true">
-      <h3>Mulligan</h3>
       {waitingMessage ? (
         <div className="mulligan-waiting" role="status">
           <span className="phase-spinner" aria-hidden="true" />
@@ -1408,7 +1614,15 @@ const MulliganModal = ({
         </div>
       ) : (
         <>
-          <p>Select up to {limit} card{limit === 1 ? '' : 's'} to replace.</p>
+          <div className="mulligan-modal__header">
+            <div>
+              <p className="mulligan-modal__eyebrow">Hand smoothing</p>
+              <h3>Mulligan Selection</h3>
+            </div>
+            <div className="mulligan-modal__limit">
+              Up to {limit} card{limit === 1 ? '' : 's'}
+            </div>
+          </div>
           <p className="mulligan-count">
             Selected {selection.length} / {limit}
             {selection.length === limit ? ' · Ready to submit' : ''}
@@ -1424,8 +1638,9 @@ const MulliganModal = ({
                 onToggle(index);
               };
               return (
-                <div
+                <button
                   key={resolveHandCardKey(card, index)}
+                  type="button"
                   className={[
                     'mulligan-card-button',
                     isSelected ? 'mulligan-card-button--selected' : '',
@@ -1434,36 +1649,37 @@ const MulliganModal = ({
                     .filter(Boolean)
                     .join(' ')}
                   onClick={handleClick}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      handleClick();
-                    }
-                  }}
+                  disabled={disabled}
                 >
-                  <CardTile card={card} compact widthPx={125} isSelected={isSelected} />
-                </div>
+                  <CardTile
+                    card={card}
+                    widthPx={165}
+                    selectable={!disabled}
+                    isSelected={isSelected}
+                  />
+                  <span className="mulligan-card-button__tag">
+                    {isSelected ? 'Swap' : 'Keep'}
+                  </span>
+                </button>
               );
             })}
           </div>
           <div className="mulligan-actions">
             <button
               type="button"
-              className="prompt-button secondary"
+              className="mulligan-action-button mulligan-action-button--ghost"
               onClick={onSkip}
               disabled={loading}
             >
-              No Mulligan
+              Keep My Hand
             </button>
             <button
               type="button"
-              className="prompt-button primary mulligan-button"
+              className="mulligan-action-button mulligan-action-button--accent"
               onClick={onConfirm}
-              disabled={loading}
+              disabled={loading || selection.length === 0}
             >
-              {loading ? 'Submitting…' : 'Confirm Selection'}
+              {loading ? 'Submitting…' : 'Confirm Mulligan'}
             </button>
           </div>
         </>
@@ -1491,6 +1707,116 @@ const AnnouncementModal = ({
     </div>
   );
 };
+
+const ConcedeConfirmModal = ({
+  loading,
+  onConfirm,
+  onCancel,
+}: {
+  loading: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) => (
+  <div className="modal-backdrop">
+    <div className="concede-modal" role="dialog" aria-modal="true">
+      <h3>Concede Match?</h3>
+      <p>Conceding immediately ends the duel and awards the win to your opponent.</p>
+      <div className="concede-actions">
+        <button
+          type="button"
+          className="prompt-button secondary"
+          onClick={onCancel}
+          disabled={loading}
+        >
+          Keep Playing
+        </button>
+        <button
+          type="button"
+          className="prompt-button danger"
+          onClick={onConfirm}
+          disabled={loading}
+        >
+          {loading ? 'Conceding…' : 'Yes, Concede'}
+        </button>
+      </div>
+    </div>
+  </div>
+);
+
+const CONFETTI_COLORS = ['#F87171', '#34D399', '#60A5FA', '#FBBF24', '#F472B6', '#FCD34D'];
+
+const ConfettiBurst = () => (
+  <div className="match-confetti" aria-hidden="true">
+    {Array.from({ length: 24 }).map((_, index) => {
+      const left = (index / 24) * 100;
+      const delay = (index % 6) * 0.15;
+      const color = CONFETTI_COLORS[index % CONFETTI_COLORS.length];
+      return (
+        <span
+          key={`confetti-${index}`}
+          className="match-confetti__piece"
+          style={{
+            left: `${left}%`,
+            animationDelay: `${delay}s`,
+            backgroundColor: color,
+          }}
+        />
+      );
+    })}
+  </div>
+);
+
+const formatVictoryReason = (reason?: string | null) => {
+  if (!reason) {
+    return 'Unknown';
+  }
+  switch (reason) {
+    case 'victory_points':
+      return 'Victory Points';
+    case 'concede':
+      return 'Opponent Conceded';
+    default:
+      return reason
+        .split('_')
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ');
+  }
+};
+
+const MatchResultOverlay = ({
+  didWin,
+  opponentName,
+  reasonLabel,
+  onReturn,
+}: {
+  didWin: boolean;
+  opponentName: string;
+  reasonLabel: string;
+  onReturn: () => void;
+}) => (
+  <div
+    className={[
+      'match-result-overlay',
+      didWin ? 'match-result-overlay--win' : 'match-result-overlay--loss',
+    ]
+      .filter(Boolean)
+      .join(' ')}
+  >
+    {didWin ? <ConfettiBurst /> : null}
+    <div className="match-result-overlay__panel" role="dialog" aria-modal="true">
+      <h3>{didWin ? 'Victory!' : 'Defeat'}</h3>
+      <p>
+        {didWin
+          ? `You triumphed over ${opponentName}.`
+          : `${opponentName} has claimed this duel.`}
+      </p>
+      <p className="match-result-overlay__reason">Reason: {reasonLabel}</p>
+      <button type="button" className="prompt-button primary" onClick={onReturn}>
+        Return to Queue
+      </button>
+    </div>
+  </div>
+);
 
 type BattlefieldChoice = {
   id: string;
@@ -1550,7 +1876,10 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   ] = useSubmitInitiativeChoice();
   const [recordDuelLogEntryMutation] = useRecordDuelLogEntry();
   const [sendChatMessageMutation] = useSendChatMessage();
+  const [passPriority, { loading: passingPriority }] = usePassPriority();
+  const [activateChampionPower, { loading: activatingChampion }] = useActivateChampionPower();
 
+  const router = useRouter();
   const [playerOverride, setPlayerOverride] = useState<PlayerMatchView | null>(null);
   const [spectatorOverride, setSpectatorOverride] = useState<SpectatorGameState | null>(null);
   const [battlefieldCountdown, setBattlefieldCountdown] = useState<number | null>(null);
@@ -1569,9 +1898,14 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const [mulliganSelection, setMulliganSelection] = useState<number[]>([]);
   const [selectedUnit, setSelectedUnit] = useState<string | null>(null);
   const [pendingDeployment, setPendingDeployment] = useState<number | null>(null);
+  const [pendingLeaderDeployment, setPendingLeaderDeployment] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [sawMulliganPhase, setSawMulliganPhase] = useState(false);
   const [mulliganCompleteNotified, setMulliganCompleteNotified] = useState(false);
+  const [showConcedeConfirm, setShowConcedeConfirm] = useState(false);
+  const [concedingMatch, setConcedingMatch] = useState(false);
+  const [draggingUnitId, setDraggingUnitId] = useState<string | null>(null);
+  const [dragOverBattlefieldId, setDragOverBattlefieldId] = useState<string | null>(null);
   const { pushToast } = useToasts();
   const [duelLog, setDuelLog] = useState<DuelLogEntry[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessageEntry[]>([]);
@@ -1579,19 +1913,62 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const [draggingHandIndex, setDraggingHandIndex] = useState<number | null>(null);
   const [draggingCardKey, setDraggingCardKey] = useState<string | null>(null);
   const [boardDragHover, setBoardDragHover] = useState(false);
+  const [draggingLeader, setDraggingLeader] = useState(false);
   const [handPlayAnimations, setHandPlayAnimations] = useState<Set<string>>(new Set());
+  const [spotlightCard, setSpotlightCard] = useState<BaseCard | null>(null);
+  const [spotlightForceUpright, setSpotlightForceUpright] = useState(false);
+  const hoveredSpotlightCard = useMemo(() => {
+    if (!spotlightCard) {
+      return null;
+    }
+    if (spotlightForceUpright) {
+      return {
+        ...spotlightCard,
+        isTapped: false,
+        tapped: false,
+      };
+    }
+    return spotlightCard;
+  }, [spotlightCard, spotlightForceUpright]);
+  const [championFocus, setChampionFocus] = useState<'opponent' | 'self'>('opponent');
   const handAnimationTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const [optimisticRuneTaps, setOptimisticRuneTaps] = useState<Set<string>>(new Set());
   const runeTapTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const duelLogCounter = useRef(0);
   const autoMulliganRef = useRef(false);
   const selfZoneRef = useRef<HTMLElement | null>(null);
+  const opponentZoneRef = useRef<HTMLElement | null>(null);
+  const playerHandRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     return () => {
       Object.values(handAnimationTimeouts.current).forEach((timeout) => clearTimeout(timeout));
       handAnimationTimeouts.current = {};
       Object.values(runeTapTimeouts.current).forEach((timeout) => clearTimeout(timeout));
       runeTapTimeouts.current = {};
+    };
+  }, []);
+  useEffect(() => {
+    const evaluateChampionView = () => {
+      if (typeof window === 'undefined') {
+        return;
+      }
+      const viewportMid = window.innerHeight / 2;
+      const playerRect = selfZoneRef.current?.getBoundingClientRect();
+      if (playerRect && playerRect.top < viewportMid) {
+        setChampionFocus('self');
+        return;
+      }
+      const opponentRect = opponentZoneRef.current?.getBoundingClientRect();
+      if (opponentRect && opponentRect.top < viewportMid) {
+        setChampionFocus('opponent');
+      }
+    };
+    evaluateChampionView();
+    window.addEventListener('scroll', evaluateChampionView, { passive: true });
+    window.addEventListener('resize', evaluateChampionView);
+    return () => {
+      window.removeEventListener('scroll', evaluateChampionView);
+      window.removeEventListener('resize', evaluateChampionView);
     };
   }, []);
   const appendLog = useCallback(
@@ -1682,6 +2059,33 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     },
     [appendLog, persistDuelLogEntry, pushToast, setActionMessage]
   );
+  const handleCardHover = useCallback<CardHoverHandler>((card, options) => {
+    setSpotlightCard(card);
+    setSpotlightForceUpright(Boolean(card && options?.displayUntapped));
+  }, []);
+
+  const getMobilizationRestriction = useCallback((card?: BaseCard | null) => {
+    if (!card) {
+      return 'Select a unit to move.';
+    }
+    if (Boolean(card.isTapped ?? card.tapped)) {
+      return 'Exhausted units must finish the Awaken step before moving.';
+    }
+    if (card.summoned) {
+      return 'Units cannot move on the turn they enter play.';
+    }
+    return null;
+  }, []);
+
+  const canMobilizeUnit = useCallback(
+    (card?: BaseCard | null) => {
+      if (!card?.instanceId || !isCreatureCard(card)) {
+        return false;
+      }
+      return !getMobilizationRestriction(card);
+    },
+    [getMobilizationRestriction]
+  );
   const triggerHandAnimation = useCallback((key?: string | null) => {
     if (!key) {
       return;
@@ -1713,6 +2117,10 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const runeCountRefs = useRef({ self: 0, opponent: 0 });
   const runeInitRefs = useRef({ self: false, opponent: false });
   const lastTurnHolderRef = useRef<string | null>(null);
+  const lastPriorityHolderRef = useRef<string | null>(null);
+  const lastOpponentTurnHolderRef = useRef<string | null>(null);
+  const lastOpponentPriorityHolderRef = useRef<string | null>(null);
+  const combatFocusRef = useRef(false);
   const [matchInitRetries, setMatchInitRetries] = useState(0);
   const [playerDeckOrder, setPlayerDeckOrder] = useState<string[]>([]);
   const [opponentDeckOrder, setOpponentDeckOrder] = useState<string[]>([]);
@@ -1819,7 +2227,56 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     rawCurrentPlayer ?? EMPTY_PLAYER_STATE;
   const playerCreatures: BaseCard[] =
     rawCurrentPlayer?.board?.creatures ?? [];
+  const moveUnitToLocation = useCallback(
+    async (unitId: string, destinationId: string) => {
+      const unitCard = playerCreatures.find((card) => card.instanceId === unitId);
+      if (!unitCard) {
+        notify('Unable to locate that unit.', 'error', { banner: true });
+        setSelectedUnit((prev) => (prev === unitId ? null : prev));
+        return;
+      }
+      if (!canMobilizeUnit(unitCard)) {
+        notify('That unit cannot move right now.', 'warning', { banner: true });
+        return;
+      }
+      try {
+        await moveUnit({
+          variables: {
+            matchId,
+            playerId,
+            creatureInstanceId: unitId,
+            destinationId
+          }
+        });
+        const moveMessage =
+          destinationId === 'base' ? 'Unit returned to base.' : 'Unit moved to battlefield.';
+        notify(moveMessage, 'success', { banner: true });
+        setSelectedUnit(null);
+      } catch (error) {
+        console.error('Failed to move unit', error);
+        notify('Unable to move unit.', 'error', { banner: true });
+      }
+    },
+    [canMobilizeUnit, matchId, moveUnit, notify, playerCreatures, playerId, setSelectedUnit]
+  );
   const playerDeckCount = rawCurrentPlayer?.deckCount ?? 0;
+  const handleUnitDragStart = useCallback(
+    (card: BaseCard, _event?: React.DragEvent<HTMLDivElement>) => {
+      if (!card.instanceId || !canMobilizeUnit(card)) {
+        return;
+      }
+      setDraggingUnitId(card.instanceId);
+      setSelectedUnit(card.instanceId);
+    },
+    [canMobilizeUnit]
+  );
+  const handleUnitDragEnd = useCallback(
+    (_card?: BaseCard, _event?: React.DragEvent<HTMLDivElement>) => {
+      setDraggingUnitId(null);
+      setDragOverBattlefieldId(null);
+    },
+    []
+  );
   const selectedUnitCard = useMemo(
     () =>
       playerCreatures.find((card) => card.instanceId === selectedUnit) ?? null,
@@ -1835,6 +2292,9 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const spectatorOpponent = spectatorPlayers.find(
     (p) => p.playerId !== playerId
   );
+  const priorityWindow = spectatorState?.priorityWindow;
+  const focusPlayerIdState = spectatorState?.focusPlayerId ?? null;
+  const combatContext = spectatorState?.combatContext ?? null;
   const playerNameLookup = useMemo(() => {
     const lookup = new Map<string, string>();
     spectatorPlayers.forEach((entry) => {
@@ -1930,6 +2390,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     },
     [playerId, playerNameLookup, selfDisplayName]
   );
+  const combatPriorityHolderName = resolvePlayerLabel(focusPlayerIdState, 'Opponent');
   const opponentPlayerId = spectatorOpponent?.playerId ?? opponent?.playerId ?? null;
   const opponentDeckCount = spectatorOpponent?.deckCount ?? 0;
 
@@ -2257,6 +2718,12 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   }, [selectedUnit, selectedUnitCard]);
 
   useEffect(() => {
+    if (selectedUnitCard && !canMobilizeUnit(selectedUnitCard)) {
+      setSelectedUnit(null);
+    }
+  }, [canMobilizeUnit, selectedUnitCard]);
+
+  useEffect(() => {
     if (playerSelectionChoice != null) {
       setPendingInitiativeChoice(null);
     }
@@ -2281,7 +2748,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     Boolean(
       selectedUnitCard &&
         selectedUnitCard.location &&
-        selectedUnitCard.location.zone === 'battlefield'
+        selectedUnitCard.location.zone === 'battlefield' &&
+        canMobilizeUnit(selectedUnitCard)
     );
 
   const [legendCard, leaderCard] = useMemo(() => {
@@ -2324,13 +2792,23 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     spectatorOpponent?.championLeader,
     spectatorOpponent?.championLegend,
   ]);
+  const playerLeaderReady = Boolean(
+    leaderCard && currentPlayer.championLeaderState?.canActivate
+  );
 
   const battlefields = spectatorState?.battlefields ?? [];
   const controlledBattlefields = useMemo(
     () => battlefields.filter((field) => field.controller === playerId),
     [battlefields, playerId]
   );
-  const priorityWindow = spectatorState?.priorityWindow;
+  const combatBattlefield = combatContext
+    ? battlefields.find((field) => field.battlefieldId === combatContext.battlefieldId) ?? null
+    : null;
+  const combatStage = combatContext?.priorityStage ?? null;
+  const hasCombatPriority = Boolean(combatContext && focusPlayerIdState === playerId);
+  const isCombatPromptActive =
+    Boolean(priorityWindow?.type === 'combat' && priorityWindow?.event === 'battlefield-engagement') &&
+    Boolean(combatContext);
   const rawStatus = spectatorState?.status ?? 'in_progress';
   const matchStatus = rawStatus.toUpperCase();
   const isCoinFlipPhase = rawStatus === 'coin_flip';
@@ -2358,6 +2836,16 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       setPendingDeployment(null);
     }
   }, [canPlayCards, currentPlayer.hand.length, pendingDeployment]);
+  useEffect(() => {
+    if (pendingLeaderDeployment && !canPlayCards) {
+      setPendingLeaderDeployment(false);
+    }
+  }, [canPlayCards, pendingLeaderDeployment]);
+  useEffect(() => {
+    if (pendingLeaderDeployment && !playerLeaderReady) {
+      setPendingLeaderDeployment(false);
+    }
+  }, [pendingLeaderDeployment, playerLeaderReady]);
   const canAdvancePhase = canAct && rawStatus === 'in_progress';
   const awaitingInitiativeResolution =
     rawStatus === 'coin_flip' &&
@@ -2674,15 +3162,72 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     ]
   );
 
-  const handleSelectUnit = useCallback(
-    (card: BaseCard) => {
-      if (!card.instanceId || card.type !== 'CREATURE') {
+  const handleChampionLeaderDeploy = useCallback(
+    async (destinationId?: string | null) => {
+      if (!canPlayCards) {
+        notify('You cannot deploy your leader right now.', 'info', { banner: true });
         return;
       }
-      const instanceId = card.instanceId;
-      setSelectedUnit((prev) => (prev === instanceId ? null : instanceId));
+      if (!leaderCard || !playerLeaderReady) {
+        notify('Champion leader is unavailable.', 'info', { banner: true });
+        return;
+      }
+      const runePlan = evaluateRunePayment(leaderCard, playerRunes);
+      if (!runePlan.canPay) {
+        notify('Insufficient runes to deploy your leader.', 'warning', { banner: true });
+        return;
+      }
+      if (runePlan.runeIndices.length) {
+        registerOptimisticRuneTaps(runePlan.runeIndices);
+      }
+      try {
+        await activateChampionPower({
+          variables: {
+            matchId,
+            playerId,
+            target: 'leader',
+            destinationId: destinationId ?? null,
+          },
+        });
+        notify('Champion leader deployed.', 'success', { banner: true });
+        setPendingLeaderDeployment(false);
+        await refreshArenaState();
+      } catch (error) {
+        console.error('Failed to deploy champion leader', error);
+        notify('Unable to deploy champion leader right now.', 'error', { banner: true });
+      }
     },
-    []
+    [
+      activateChampionPower,
+      canPlayCards,
+      leaderCard,
+      matchId,
+      notify,
+      playerId,
+      playerLeaderReady,
+      playerRunes,
+      refreshArenaState,
+      registerOptimisticRuneTaps,
+    ]
+  );
+
+  const handleSelectUnit = useCallback(
+    (card: BaseCard) => {
+      if (!card.instanceId || !isCreatureCard(card)) {
+        return;
+      }
+      if (selectedUnit === card.instanceId) {
+        setSelectedUnit(null);
+        return;
+      }
+      const restriction = getMobilizationRestriction(card);
+      if (restriction) {
+        notify(restriction, 'warning', { banner: true });
+        return;
+      }
+      setSelectedUnit(card.instanceId);
+    },
+    [getMobilizationRestriction, notify, selectedUnit]
   );
 
   const handleMoveSelected = useCallback(
@@ -2690,25 +3235,59 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       if (!selectedUnit) {
         return;
       }
-      try {
-        await moveUnit({
-          variables: {
-            matchId,
-            playerId,
-            creatureInstanceId: selectedUnit,
-            destinationId
-          }
-        });
-        const moveMessage =
-          destinationId === 'base' ? 'Unit returned to base.' : 'Unit moved to battlefield.';
-        notify(moveMessage, 'success', { banner: true });
-        setSelectedUnit(null);
-      } catch (error) {
-        console.error('Failed to move unit', error);
-        notify('Unable to move unit.', 'error', { banner: true });
+      await moveUnitToLocation(selectedUnit, destinationId);
+    },
+    [moveUnitToLocation, selectedUnit]
+  );
+
+  const handleBattlefieldDragOver = useCallback(
+    (battlefieldId: string, event: React.DragEvent<HTMLDivElement>) => {
+      if (!draggingUnitId && !draggingLeader) {
+        return;
+      }
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      setDragOverBattlefieldId((previous) => (previous === battlefieldId ? previous : battlefieldId));
+    },
+    [draggingLeader, draggingUnitId]
+  );
+
+  const handleBattlefieldDragLeave = useCallback(
+    (battlefieldId: string, event: React.DragEvent<HTMLDivElement>) => {
+      if (!draggingUnitId && !draggingLeader) {
+        return;
+      }
+      const nextTarget = event.relatedTarget as Node | null;
+      if (nextTarget && event.currentTarget.contains(nextTarget)) {
+        return;
+      }
+      setDragOverBattlefieldId((previous) => (previous === battlefieldId ? null : previous));
+    },
+    [draggingLeader, draggingUnitId]
+  );
+
+  const handleBattlefieldDrop = useCallback(
+    (battlefieldId: string, event: React.DragEvent<HTMLDivElement>) => {
+      if (!draggingUnitId && !draggingLeader) {
+        setDragOverBattlefieldId(null);
+        return;
+      }
+      event.preventDefault();
+      if (draggingUnitId) {
+        const unitId = draggingUnitId;
+        setDraggingUnitId(null);
+        setDragOverBattlefieldId(null);
+        void moveUnitToLocation(unitId, battlefieldId);
+        return;
+      }
+      if (draggingLeader) {
+        setDraggingLeader(false);
+        setPendingLeaderDeployment(false);
+        setDragOverBattlefieldId(null);
+        void handleChampionLeaderDeploy(battlefieldId);
       }
     },
-    [matchId, moveUnit, notify, playerId, selectedUnit]
+    [draggingLeader, draggingUnitId, handleChampionLeaderDeploy, moveUnitToLocation]
   );
 
   const handleInitiativeChoice = useCallback(
@@ -2762,6 +3341,17 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         return canAffordCard(card);
       }),
     [canAffordCard, canPlayCards, currentPlayer.hand]
+  );
+  const handFocusStates = useMemo(
+    () => {
+      if (!hasCombatPriority || !combatStage) {
+        return currentPlayer.hand.map(() => null);
+      }
+      return currentPlayer.hand.map((card) =>
+        cardSupportsCombatTiming(card, combatStage) ? combatStage : null
+      );
+    },
+    [combatStage, currentPlayer.hand, hasCombatPriority]
   );
 
   const toggleMulliganSelection = (index: number) => {
@@ -2835,21 +3425,21 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const handleBoardDragOver = useCallback(
     (event: React.DragEvent) => {
-      if (draggingHandIndex === null) {
+      if (draggingHandIndex === null && !draggingLeader) {
         return;
       }
       event.preventDefault();
-       event.dataTransfer.dropEffect = 'move';
+      event.dataTransfer.dropEffect = 'move';
       if (!boardDragHover) {
         setBoardDragHover(true);
       }
     },
-    [boardDragHover, draggingHandIndex]
+    [boardDragHover, draggingHandIndex, draggingLeader]
   );
 
   const handleBoardDragLeave = useCallback(
     (event: React.DragEvent) => {
-      if (draggingHandIndex === null) {
+      if (draggingHandIndex === null && !draggingLeader) {
         return;
       }
       if (
@@ -2861,23 +3451,32 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       }
       setBoardDragHover(false);
     },
-    [draggingHandIndex]
+    [draggingHandIndex, draggingLeader]
   );
 
   const handleBoardDrop = useCallback(
     (event: React.DragEvent) => {
-      if (draggingHandIndex === null) {
+      if (draggingHandIndex === null && !draggingLeader) {
         return;
       }
       event.preventDefault();
-      const index = draggingHandIndex;
-      setDraggingHandIndex(null);
-      const animationKey = draggingCardKey;
-      setDraggingCardKey(null);
-      setBoardDragHover(false);
-      void handlePlayCard(index, 'base', { animateKey: animationKey ?? null });
+      if (draggingHandIndex !== null) {
+        const index = draggingHandIndex;
+        setDraggingHandIndex(null);
+        const animationKey = draggingCardKey;
+        setDraggingCardKey(null);
+        setBoardDragHover(false);
+        void handlePlayCard(index, 'base', { animateKey: animationKey ?? null });
+        return;
+      }
+      if (draggingLeader) {
+        setDraggingLeader(false);
+        setPendingLeaderDeployment(false);
+        setBoardDragHover(false);
+        void handleChampionLeaderDeploy('base');
+      }
     },
-    [draggingCardKey, draggingHandIndex, handlePlayCard]
+    [draggingCardKey, draggingHandIndex, draggingLeader, handleChampionLeaderDeploy, handlePlayCard]
   );
 
   const submitMulliganChoice = useCallback(
@@ -2978,10 +3577,82 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     }
   };
 
-  const handleConcede = async () => {
-    if (!confirm('Concede the match?')) {
+  const handlePassPriority = useCallback(async () => {
+    if (!combatContext || focusPlayerIdState !== playerId) {
       return;
     }
+    try {
+      await passPriority({
+        variables: {
+          matchId,
+          playerId,
+        },
+      });
+      notify('Priority passed.', 'info', { banner: true });
+    } catch (error) {
+      console.error('Failed to pass priority', error);
+      notify('Unable to pass priority right now.', 'error', { banner: true });
+    }
+  }, [combatContext, focusPlayerIdState, matchId, notify, passPriority, playerId]);
+
+  const handleChampionLegendActivate = useCallback(async () => {
+    if (!matchId || !playerId) {
+      return;
+    }
+    try {
+      await activateChampionPower({
+        variables: {
+          matchId,
+          playerId,
+          target: 'legend',
+          destinationId: null,
+        },
+      });
+      notify('Champion power activated.', 'success', { banner: true });
+    } catch (error) {
+      console.error('Failed to activate champion ability', error);
+      notify('Unable to activate champion right now.', 'error', { banner: true });
+    }
+  }, [activateChampionPower, matchId, notify, playerId]);
+
+  const handleChampionLeaderClick = useCallback(() => {
+    if (!playerLeaderReady || activatingChampion) {
+      return;
+    }
+    if (controlledBattlefields.length > 0) {
+      setPendingLeaderDeployment(true);
+      return;
+    }
+    void handleChampionLeaderDeploy(null);
+  }, [activatingChampion, controlledBattlefields, handleChampionLeaderDeploy, playerLeaderReady]);
+
+  const handleChampionLeaderDragStart = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!playerLeaderReady || activatingChampion) {
+        event.preventDefault();
+        return;
+      }
+      event.dataTransfer.setData('text/plain', 'champion-leader');
+      setDraggingLeader(true);
+      setPendingLeaderDeployment(false);
+    },
+    [activatingChampion, playerLeaderReady]
+  );
+
+  const handleChampionLeaderDragEnd = useCallback(() => {
+    setDraggingLeader(false);
+    setBoardDragHover(false);
+  }, []);
+
+  const handleConcede = () => {
+    setShowConcedeConfirm(true);
+  };
+
+  const confirmConcede = useCallback(async () => {
+    if (concedingMatch) {
+      return;
+    }
+    setConcedingMatch(true);
     try {
       await concedeMatch({
         variables: {
@@ -2989,11 +3660,25 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           playerId,
         },
       });
+      setShowConcedeConfirm(false);
     } catch (error) {
       console.error('Failed to concede', error);
       notify('Unable to concede right now.', 'error', { banner: true });
+    } finally {
+      setConcedingMatch(false);
     }
-  };
+  }, [concedingMatch, concedeMatch, matchId, notify, playerId]);
+
+  const cancelConcedePrompt = useCallback(() => {
+    if (concedingMatch) {
+      return;
+    }
+    setShowConcedeConfirm(false);
+  }, [concedingMatch]);
+
+  const handleReturnToQueue = useCallback(() => {
+    router.push('/matchmaking');
+  }, [router]);
 
   const handleChatSubmit = useCallback(
     async (event?: React.FormEvent) => {
@@ -3089,6 +3774,44 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       };
     });
   }, [battlefieldOptions]);
+  const renderBattlefieldArtPreview = (
+    card?: BaseCard | null,
+    label?: string,
+    variant: 'default' | 'large' = 'default'
+  ) => {
+    if (!card) {
+      return null;
+    }
+    const art =
+      getCardImage(card) ??
+      buildCardArtUrl(card.slug ?? card.cardId ?? null);
+    if (!art) {
+      return (
+        <CardTile
+          card={card}
+          label={label}
+          compact
+          widthPx={variant === 'large' ? 220 : 150}
+          onHover={handleCardHover}
+        />
+      );
+    }
+    const previewClasses = ['battlefield-art-preview'];
+    if (variant === 'large') {
+      previewClasses.push('battlefield-art-preview--large');
+    }
+    return (
+      <div className={previewClasses.join(' ')}>
+        <img
+          src={art}
+          alt={label ?? card.name ?? 'Battlefield'}
+          loading="lazy"
+          draggable={false}
+        />
+        {label ? <span className="battlefield-art-preview__label">{label}</span> : null}
+      </div>
+    );
+  };
   const renderBattlefieldChoice = (
     choice: BattlefieldChoice,
     options?: { spotlight?: boolean; selected?: boolean }
@@ -3130,9 +3853,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
             <img
               src={choice.art}
               alt={choice.label}
-              width={270}
-              height={400}
-              style={{ width: '270px', height: 'auto' }}
+              width={520}
+              height={320}
               loading="lazy"
               draggable={false}
             />
@@ -3440,6 +4162,101 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     }
     lastTurnHolderRef.current = activeTurnPlayerId ?? null;
   }, [activeTurnPlayerId, playerId]);
+  useEffect(() => {
+    if (!opponentZoneRef.current) {
+      lastOpponentTurnHolderRef.current = activeTurnPlayerId ?? null;
+      return;
+    }
+    if (
+      activeTurnPlayerId &&
+      activeTurnPlayerId !== playerId &&
+      lastOpponentTurnHolderRef.current !== activeTurnPlayerId
+    ) {
+      opponentZoneRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    lastOpponentTurnHolderRef.current = activeTurnPlayerId ?? null;
+  }, [activeTurnPlayerId, playerId]);
+  useEffect(() => {
+    const holder = priorityWindow?.holder ?? null;
+    if (!selfZoneRef.current) {
+      lastPriorityHolderRef.current = holder;
+      return;
+    }
+    if (holder === playerId && lastPriorityHolderRef.current !== holder) {
+      selfZoneRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    lastPriorityHolderRef.current = holder;
+  }, [playerId, priorityWindow?.holder]);
+  useEffect(() => {
+    const holder = priorityWindow?.holder ?? null;
+    if (!opponentZoneRef.current) {
+      lastOpponentPriorityHolderRef.current = holder;
+      return;
+    }
+    if (holder && holder !== playerId && lastOpponentPriorityHolderRef.current !== holder) {
+      opponentZoneRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    lastOpponentPriorityHolderRef.current = holder;
+  }, [playerId, priorityWindow?.holder]);
+  useEffect(() => {
+    if (hasCombatPriority && !combatFocusRef.current && playerHandRef.current) {
+      playerHandRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    combatFocusRef.current = hasCombatPriority;
+  }, [hasCombatPriority]);
+
+  const opponentHeading = resolvePlayerLabel(opponentPlayerId, 'Opponent');
+  const selfHeading = resolvePlayerLabel(playerId, 'You');
+  const playerVictoryPoints =
+    currentPlayer?.victoryPoints ??
+    spectatorSelf?.victoryPoints ??
+    0;
+  const playerVictoryTarget =
+    currentPlayer?.victoryScore ??
+    spectatorSelf?.victoryScore ??
+    0;
+  const opponentVictoryPoints =
+    opponent?.victoryPoints ??
+    spectatorOpponent?.victoryPoints ??
+    0;
+  const opponentVictoryTarget =
+    opponent?.victoryScore ??
+    spectatorOpponent?.victoryScore ??
+    playerVictoryTarget ??
+    0;
+  const [playerVictoryFlash, setPlayerVictoryFlash] = useState(false);
+  const [opponentVictoryFlash, setOpponentVictoryFlash] = useState(false);
+  const playerVictoryPrev = useRef(playerVictoryPoints);
+  const opponentVictoryPrev = useRef(opponentVictoryPoints);
+
+  useEffect(() => {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    if (opponentVictoryPoints > opponentVictoryPrev.current) {
+      setOpponentVictoryFlash(true);
+      notify(`${opponentHeading} gained a victory point.`, 'warning');
+      timeout = setTimeout(() => setOpponentVictoryFlash(false), 2200);
+    }
+    opponentVictoryPrev.current = opponentVictoryPoints;
+    return () => {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+    };
+  }, [notify, opponentHeading, opponentVictoryPoints]);
+  useEffect(() => {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    if (playerVictoryPoints > playerVictoryPrev.current) {
+      setPlayerVictoryFlash(true);
+      notify('You gained a victory point!', 'success', { banner: true });
+      timeout = setTimeout(() => setPlayerVictoryFlash(false), 2200);
+    }
+    playerVictoryPrev.current = playerVictoryPoints;
+    return () => {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+    };
+  }, [playerVictoryPoints, notify]);
 
   if (matchInitializing && !hasMatchInitTimedOut) {
     return (
@@ -3494,24 +4311,13 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       artifacts: [],
       enchantments: [],
     };
-  const playerBaseUnits = playerCreatures.filter(
-    (card) => card.location?.zone === 'base'
-  );
-  const opponentBaseUnits = (opponentBoardState.creatures ?? []).filter(
-    (card) => card.location?.zone === 'base'
-  );
-  const playerFrontlineBoard: PlayerBoardState = {
-    ...currentPlayer.board,
-    creatures: playerCreatures.filter(
-      (card) => card.location?.zone !== 'base'
-    ),
-  };
-  const opponentFrontlineBoard: PlayerBoardState = {
-    ...opponentBoardState,
-    creatures: (opponentBoardState.creatures ?? []).filter(
-      (card) => card.location?.zone !== 'base'
-    ),
-  };
+  const opponentCreatures = opponentBoardState.creatures ?? [];
+  const playerBaseUnits = filterBaseCards(playerCreatures);
+  const opponentBaseUnits = filterBaseCards(opponentCreatures);
+  const playerBaseArtifacts = filterBaseCards(currentPlayer.board?.artifacts ?? []);
+  const playerBaseEnchantments = filterBaseCards(currentPlayer.board?.enchantments ?? []);
+  const opponentBaseArtifacts = filterBaseCards(opponentBoardState.artifacts ?? []);
+  const opponentBaseEnchantments = filterBaseCards(opponentBoardState.enchantments ?? []);
   const handInteractable = Boolean(mulliganPrompt || canPlayCards);
   const holdBattlefieldReveal = battlefieldAdvanceTriggered && !battlefieldAdvanceComplete;
   const showInitiativeScreen =
@@ -3523,8 +4329,13 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const showingInitiativeResult = Boolean(
     initiativeOutcome && !isCoinFlipPhase && initiativeRevealActive
   );
-  const opponentHeading = resolvePlayerLabel(opponentPlayerId, 'Opponent');
-  const selfHeading = resolvePlayerLabel(playerId, 'You');
+  const matchWinnerId = spectatorState?.winner ?? null;
+  const matchEnded = rawStatus === 'winner_determined';
+  const playerWonMatch = matchEnded && matchWinnerId === playerId;
+  const opponentNameForResult = playerWonMatch
+    ? opponentHeading
+    : resolvePlayerLabel(matchWinnerId, opponentHeading);
+  const matchResultReasonLabel = formatVictoryReason(spectatorState?.endReason ?? null);
   const mulliganPromptPending = playerMulliganPending || opponentMulliganPending;
   const showMulliganModal =
     mulliganPromptPending && !showInitiativeScreen && !showBattlefieldScreen;
@@ -3590,7 +4401,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                         </div>
                       ) : (
                         <div className="selection-card">
-                          <CardTile card={selectionCard} compact />
+                          {renderBattlefieldArtPreview(selectionCard)}
                         </div>
                       )
                     ) : (
@@ -3785,7 +4596,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           <div className="locked-card-callout">
             <div className="prompt-title">Battlefield locked</div>
             {playerBattlefieldCard ? (
-              <CardTile card={playerBattlefieldCard} label="Your battlefield" />
+              renderBattlefieldArtPreview(playerBattlefieldCard, 'Your battlefield', 'large')
             ) : (
               <div className="pill-empty">Awaiting confirmation…</div>
             )}
@@ -3853,7 +4664,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                   </div>
                 ) : (
                   <div className="selection-card">
-                    <CardTile card={selectionCard} compact />
+                    {renderBattlefieldArtPreview(selectionCard)}
                   </div>
                 )
               ) : (
@@ -3907,17 +4718,17 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     const deckCount = isSelf ? playerDeckOrder.length : opponentDeckOrder.length;
     const graveyardCards = isSelf ? playerGraveyard : opponentGraveyard;
     const baseUnits = isSelf ? playerBaseUnits : opponentBaseUnits;
-    const frontlineBoard = isSelf ? playerFrontlineBoard : opponentFrontlineBoard;
+    const baseArtifacts = isSelf ? playerBaseArtifacts : opponentBaseArtifacts;
+    const baseEnchantments = isSelf
+      ? playerBaseEnchantments
+      : opponentBaseEnchantments;
     const legendRef = isSelf ? legendCard : opponentLegend;
     const leaderRef = isSelf ? leaderCard : opponentLeader;
     const handCount = isSelf ? currentPlayer.hand.length : opponentHandSize;
     const championExclude = buildExcludeSet(legendRef ?? undefined, leaderRef ?? undefined);
-    const formationCards = combineBoardCards(
-      baseUnits,
-      frontlineBoard?.creatures,
-      frontlineBoard?.artifacts,
-      frontlineBoard?.enchantments
-    ).filter((card) => !championExclude.has(cardIdValue(card)));
+    const formationCards = combineBoardCards(baseUnits, baseArtifacts, baseEnchantments).filter(
+      (card) => !championExclude.has(cardIdValue(card))
+    );
     const handControls = isSelf
       ? (
         <>
@@ -3962,12 +4773,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       .filter(Boolean)
       .join(' ');
     return (
-      <section className={zoneClass} ref={isSelf ? selfZoneRef : undefined}>
-        {(!isSelf && (
-          <div className="player-zone__hand player-zone__hand--opponent">
-            <HiddenHand count={handCount} />
-          </div>
-        )) || null}
+      <section className={zoneClass} ref={isSelf ? selfZoneRef : opponentZoneRef}>
         <div className={matClasses} {...matDragHandlers}>
           <div className="player-mat__core">
             {(
@@ -3990,9 +4796,11 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                           <RuneTokens
                             runes={runeTokensList}
                             optimisticTaps={isSelf ? optimisticRuneTaps : undefined}
+                            onHover={handleCardHover}
                           />
                           <RuneRecycleLayer
                             events={isSelf ? playerRecycleEvents : opponentRecycleEvents}
+                            onHover={handleCardHover}
                           />
                         </div>
                         {!isSelf && (
@@ -4013,6 +4821,22 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                     onCardSelect={isSelf && canAct ? handleSelectUnit : undefined}
                     selectable={isSelf && canAct}
                     selectedCardId={isSelf ? selectedUnit : undefined}
+                    disableCard={
+                      isSelf && canAct
+                        ? (card) => isCreatureCard(card) && !canMobilizeUnit(card)
+                        : undefined
+                    }
+                    dragEnabled={
+                      isSelf && canAct
+                        ? (card) =>
+                            isCreatureCard(card) &&
+                            isCardAtBase(card) &&
+                            canMobilizeUnit(card)
+                        : undefined
+                    }
+                    onCardDragStart={isSelf && canAct ? handleUnitDragStart : undefined}
+                    onCardDragEnd={isSelf && canAct ? handleUnitDragEnd : undefined}
+                    onCardHover={handleCardHover}
                   />
                 </div>
               );
@@ -4046,7 +4870,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           </div>
         </div>
         {isSelf && (
-          <div className="player-zone__hand">
+          <div className="player-zone__hand" ref={playerHandRef}>
             <HandRow
               isSelf
               cards={currentPlayer.hand}
@@ -4061,12 +4885,25 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
               cardWidth={125}
               playableStates={playableCardFlags}
               playingCardKeys={handPlayAnimations}
+              focusStates={handFocusStates}
+              onCardHover={handleCardHover}
             />
           </div>
         )}
       </section>
     );
   };
+
+  const selectedUnitCanMobilize = canMobilizeUnit(selectedUnitCard);
+  const selectedUnitAtBase = isCardAtBase(selectedUnitCard);
+  const mobilizationReady = Boolean(
+    selectedUnitCard &&
+      selectedUnitAtBase &&
+      selectedUnitCanMobilize &&
+      canAct &&
+      matchStatus === 'IN_PROGRESS'
+  );
+  const shouldHighlightBattlefieldTargets = mobilizationReady && battlefields.length > 0;
 
   const battlefieldStage = (
     <div className="battlefield-stage">
@@ -4084,21 +4921,105 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
             const art =
               getCardImage(battlefieldCard) ??
               buildCardArtUrl(field.slug ?? field.card?.slug ?? null);
+            const selectedUnitIsHere =
+              selectedUnitCard?.location?.zone === 'battlefield' &&
+              selectedUnitCard.location?.battlefieldId === field.battlefieldId;
+            const highlightTarget = shouldHighlightBattlefieldTargets && !selectedUnitIsHere;
+            const isDragHovering = highlightTarget && dragOverBattlefieldId === field.battlefieldId;
+            const battlefieldActive = combatContext?.battlefieldId === field.battlefieldId;
+            const presence = field.presence ?? [];
+            const selfPresence =
+              presence.find((entry) => entry.playerId === playerId)?.totalMight ?? 0;
+            const opponentPresence =
+              opponentPlayerId
+                ? presence.find((entry) => entry.playerId === opponentPlayerId)?.totalMight ?? 0
+                : 0;
+            const showPresence = presence.length > 0 || battlefieldActive;
+            const battlefieldCardClass = [
+              'battlefield-stage__card',
+              highlightTarget ? 'battlefield-stage__card--mobilize-ready' : '',
+              isDragHovering ? 'battlefield-stage__card--mobilize-hover' : '',
+              battlefieldActive ? 'battlefield-stage__card--combat-active' : '',
+            ]
+              .filter(Boolean)
+              .join(' ');
+            const flattenedCreatures =
+              spectatorPlayers
+                .flatMap((player) => {
+                  const ownerSlot = player.playerId === playerId ? 'self' : 'opponent';
+                  const boardState = player.board?.creatures ?? [];
+                  return boardState
+                    .filter(
+                      (card) =>
+                        card.location?.zone === 'battlefield' &&
+                        card.location?.battlefieldId === field.battlefieldId
+                    )
+                    .map((card) => ({
+                      ownerSlot,
+                      card
+                    }));
+                }) ?? [];
             return (
-              <div className="battlefield-stage__card" key={field.battlefieldId}>
-                {art ? (
-                  <img
-                    src={art}
-                    alt={field.name ?? 'Battlefield'}
-                    className="battlefield-stage__art"
-                    width={200}
-                    height={280}
-                    loading="lazy"
-                    draggable={false}
-                  />
-                ) : (
-                  <CardTile card={battlefieldCard} label={field.name ?? 'Battlefield'} />
-                )}
+              <div
+                className={battlefieldCardClass}
+                key={field.battlefieldId}
+                onDragOver={(event) => handleBattlefieldDragOver(field.battlefieldId, event)}
+                onDragLeave={(event) => handleBattlefieldDragLeave(field.battlefieldId, event)}
+                onDrop={(event) => handleBattlefieldDrop(field.battlefieldId, event)}
+              >
+                <div className="battlefield-stage__art-wrapper">
+                  {art ? (
+                    <img
+                      src={art}
+                      alt={field.name ?? 'Battlefield'}
+                      className="battlefield-stage__art"
+                      width={200}
+                      height={280}
+                      loading="lazy"
+                      draggable={false}
+                    />
+                  ) : (
+                    <CardTile
+                      card={battlefieldCard}
+                      label={field.name ?? 'Battlefield'}
+                      onHover={handleCardHover}
+                    />
+                  )}
+                  {showPresence && (
+                    <div className="battlefield-stage__presence">
+                      <div className="battlefield-stage__presence-value battlefield-stage__presence-value--opponent">
+                        <span>{opponentHeading}</span>
+                        <strong>{opponentPresence}</strong>
+                      </div>
+                      <div className="battlefield-stage__presence-value battlefield-stage__presence-value--self">
+                        <span>You</span>
+                        <strong>{selfPresence}</strong>
+                      </div>
+                    </div>
+                  )}
+                  {flattenedCreatures.length > 0 && (
+                    <div className="battlefield-stage__unit-layer">
+                      <div className="battlefield-stage__unit-lane battlefield-stage__unit-lane--opponent">
+                        {flattenedCreatures
+                          .filter((entry) => entry.ownerSlot === 'opponent')
+                          .map((entry) => (
+                            <div key={entry.card.instanceId} className="battlefield-stage__unit">
+                              <CardTile card={entry.card} compact onHover={handleCardHover} />
+                            </div>
+                          ))}
+                      </div>
+                      <div className="battlefield-stage__unit-lane battlefield-stage__unit-lane--self">
+                        {flattenedCreatures
+                          .filter((entry) => entry.ownerSlot === 'self')
+                          .map((entry) => (
+                            <div key={entry.card.instanceId} className="battlefield-stage__unit battlefield-stage__unit--self">
+                              <CardTile card={entry.card} compact onHover={handleCardHover} />
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
                 {selectedUnitCard && (
                   <button
                     className="prompt-button secondary"
@@ -4107,8 +5028,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                       !canAct ||
                       movingUnit ||
                       !selectedUnitCard ||
-                      (selectedUnitCard.location?.zone === 'battlefield' &&
-                        selectedUnitCard.location?.battlefieldId === field.battlefieldId)
+                      !selectedUnitCanMobilize ||
+                      selectedUnitIsHere
                     }
                   >
                     {movingUnit ? 'Deploying…' : `Deploy to ${field.name ?? 'battlefield'}`}
@@ -4121,6 +5042,13 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       </div>
     </div>
   );
+
+  const opponentHandStrip =
+    opponentHandSize > 0 ? (
+      <div className="opponent-hand-strip">
+        <HiddenHand count={opponentHandSize} />
+      </div>
+    ) : null;
 
   const matchInfoPanel = (
     <div className="match-info-panel">
@@ -4146,36 +5074,297 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
             : 'Open'}
         </strong>
       </div>
+      <div>
+        <span>Your Victory Points</span>
+        <strong>
+          {playerVictoryPoints}/{playerVictoryTarget || '—'}
+        </strong>
+      </div>
+      <div>
+        <span>Opponent Victory Points</span>
+        <strong>
+          {opponentVictoryPoints}/{opponentVictoryTarget || '—'}
+        </strong>
+      </div>
+      <div className="match-info-panel__hint">
+        Gain 1 point each time you conquer or hold a battlefield.
+      </div>
     </div>
   );
+  const opponentHandBanner = opponentHandStrip ? (
+    <div className="opponent-hand-banner">
+      <div className="opponent-hand-banner__label">{opponentHeading}'s Hand</div>
+      {opponentHandStrip}
+    </div>
+  ) : null;
+  const matchStatusRow = <div className="match-status-row">{matchInfoPanel}</div>;
+  const matchStatusClusterSticky = (
+    <div className="match-status-cluster">
+      <div className="match-status-row-wrapper">{matchStatusRow}</div>
+      {opponentHandBanner}
+    </div>
+  );
+  const combatPriorityBanner =
+    isCombatPromptActive && combatContext ? (
+      <div className="combat-priority-banner" role="status">
+        <div className="combat-priority-banner__info">
+          <span>Battlefield Engagement</span>
+          <strong>{combatBattlefield?.name ?? 'Contested battlefield'}</strong>
+          <div className="combat-priority-banner__details">
+            <span>Stage: {combatStage === 'reaction' ? 'Reaction' : 'Action'}</span>
+            <span>
+              {hasCombatPriority ? 'You have priority' : `${combatPriorityHolderName} has priority`}
+            </span>
+          </div>
+        </div>
+        <div className="combat-priority-banner__actions">
+          {hasCombatPriority ? (
+            <button
+              type="button"
+              className="prompt-button secondary"
+              onClick={handlePassPriority}
+              disabled={passingPriority}
+            >
+              {passingPriority ? 'Passing…' : 'Pass Priority'}
+            </button>
+          ) : (
+            <span className="combat-priority-banner__waiting">
+              Waiting for {combatPriorityHolderName}
+            </span>
+          )}
+        </div>
+      </div>
+    ) : null;
 
   const renderChampionPanel = (
     title: string,
     legend: BaseCard | null,
-    leader: BaseCard | null
+    leader: BaseCard | null,
+    points: number,
+    target: number,
+    legendState?: ChampionAbilityStateData | null,
+    leaderState?: ChampionAbilityStateData | null,
+    isSelfPanel = false,
+    highlightVictory = false
+  ) => {
+    const legendReady = Boolean(isSelfPanel && legendState?.canActivate && legend);
+    const leaderReady = Boolean(isSelfPanel && leaderState?.canActivate && leader);
+    const legendStatusText = legendState
+      ? legendState.canActivate
+        ? `Ready${legendState.costSummary ? ` — ${legendState.costSummary}` : ''}`
+        : legendState.reason ?? 'Unavailable'
+      : null;
+    const leaderStatusText = leaderState
+      ? leaderState.canActivate
+        ? `Ready${leaderState.costSummary ? ` — ${leaderState.costSummary}` : ''}`
+        : leaderState.reason ?? 'Unavailable'
+      : null;
+    return (
+      <div className="sidebar-champions">
+        <div className="champion-header">
+          <h4>{title}</h4>
+          <div
+            className={[
+              'champion-victory',
+              highlightVictory ? 'champion-victory--flash' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+          >
+            <span>Victory</span>
+            <strong>
+              {points}/{target || '—'}
+            </strong>
+          </div>
+        </div>
+        <div className="champion-focus-group">
+          <div className={`champion-slot${legendReady ? ' champion-slot--ready' : ''}`}>
+            <CardTile
+              card={legend ?? undefined}
+              label="Legend"
+              compact
+              widthPx={125}
+              selectable={legendReady}
+              disabled={!legendReady || activatingChampion}
+              onClick={legendReady ? handleChampionLegendActivate : undefined}
+              title={legendState?.costSummary ?? legendState?.reason ?? undefined}
+              onHover={handleCardHover}
+            />
+            {isSelfPanel && legendStatusText ? (
+              <div
+                className={`champion-ability-status${
+                  legendState?.canActivate ? ' champion-ability-status--ready' : ' champion-ability-status--blocked'
+                }`}
+              >
+                {legendStatusText}
+              </div>
+            ) : null}
+          </div>
+          <div className={`champion-slot${leaderReady ? ' champion-slot--ready' : ''}`}>
+            <CardTile
+              card={leader ?? undefined}
+              label="Leader"
+              compact
+              widthPx={125}
+              selectable={leaderReady}
+              disabled={!leaderReady || activatingChampion}
+              draggable={Boolean(isSelfPanel && leaderReady && !activatingChampion)}
+              onDragStart={isSelfPanel ? handleChampionLeaderDragStart : undefined}
+              onDragEnd={isSelfPanel ? handleChampionLeaderDragEnd : undefined}
+              onClick={isSelfPanel && leaderReady ? handleChampionLeaderClick : undefined}
+              title={leaderState?.costSummary ?? leaderState?.reason ?? undefined}
+              onHover={handleCardHover}
+            />
+            {isSelfPanel && leaderStatusText ? (
+              <div
+                className={`champion-ability-status${
+                  leaderState?.canActivate ? ' champion-ability-status--ready' : ' champion-ability-status--blocked'
+                }`}
+              >
+                {leaderStatusText}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const playerChampionPanel = renderChampionPanel(
+    'Your Champions',
+    legendCard ?? null,
+    leaderCard ?? null,
+    playerVictoryPoints,
+    playerVictoryTarget,
+    currentPlayer.championLegendState ?? null,
+    currentPlayer.championLeaderState ?? null,
+    true,
+    playerVictoryFlash
+  );
+  const opponentChampionPanel = renderChampionPanel(
+    `${opponentHeading}'s Champions`,
+    opponentLegend ?? null,
+    opponentLeader ?? null,
+    opponentVictoryPoints,
+    opponentVictoryTarget,
+    resolvedOpponent.championLegendState ?? null,
+    resolvedOpponent.championLeaderState ?? null,
+    false,
+    opponentVictoryFlash
+  );
+
+  const spotlightDisplayCard = hoveredSpotlightCard;
+  const spotlightEffectText = resolveCardEffectText(spotlightDisplayCard);
+  const cardSpotlightPanel = (
+    <div className="card-spotlight-panel">
+      <div className="card-spotlight-panel__art">
+        {spotlightDisplayCard ? (
+          <CardTile
+            card={spotlightDisplayCard}
+            widthPx={260}
+            onHover={handleCardHover}
+          />
+        ) : (
+          <div className="card-spotlight-panel__placeholder" />
+        )}
+      </div>
+      <div className="card-spotlight-panel__details">
+        {spotlightDisplayCard ? (
+          <>
+            <div className="card-spotlight-panel__name">
+              {spotlightDisplayCard.name ?? 'Unknown Card'}
+            </div>
+            <div className="card-spotlight-panel__meta">
+              {spotlightDisplayCard.type ?? '—'}{' '}
+              {spotlightDisplayCard.keywords?.length
+                ? `• ${spotlightDisplayCard.keywords.join(', ')}`
+                : ''}
+            </div>
+            {spotlightEffectText ? (
+              <div
+                className="card-spotlight-panel__text"
+                dangerouslySetInnerHTML={{ __html: spotlightEffectText }}
+              />
+            ) : (
+              <div className="card-spotlight-panel__text card-spotlight-panel__text--empty">
+                No rules text
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="card-spotlight-panel__text card-spotlight-panel__text--empty">
+            Hover a card to inspect details
+          </div>
+        )}
+      </div>
+    </div>
+  );
+  const championSpotlightSticky = (
+    <div className="card-spotlight-sticky">{cardSpotlightPanel}</div>
+  );
+  const championDock = (
+    <section className="champion-dock" aria-label="Champion panels">
+      {championFocus === 'self' ? playerChampionPanel : opponentChampionPanel}
+    </section>
+  );
+
+  const renderDeploymentModal = (
+    card: BaseCard,
+    onDeploy: (destinationId: string | null) => void,
+    onCancel: () => void
   ) => (
-    <div className="sidebar-champions">
-      <h4>{title}</h4>
-      <div className="champion-focus-group">
-        <CardTile card={legend ?? undefined} label="Legend" compact widthPx={125} />
-        <CardTile card={leader ?? undefined} label="Leader" compact widthPx={125} />
+    <div className="deploy-overlay">
+      <div className="deploy-modal">
+        <h4>Deploy {card.name ?? 'Unit'}</h4>
+        <p>Select where you would like to deploy this unit.</p>
+        <div className="deploy-options">
+          <button
+            type="button"
+            className="prompt-button secondary"
+            onClick={() => onDeploy(null)}
+          >
+            Base
+          </button>
+          {controlledBattlefields.map((field) => (
+            <button
+              type="button"
+              key={field.battlefieldId}
+              className="prompt-button primary"
+              onClick={() => onDeploy(field.battlefieldId)}
+            >
+              {field.name}
+            </button>
+          ))}
+        </div>
+        <button type="button" className="prompt-button danger" onClick={onCancel}>
+          Cancel
+        </button>
       </div>
     </div>
   );
 
-  const playerChampionPanel = renderChampionPanel('Your Champions', legendCard ?? null, leaderCard ?? null);
-  const opponentChampionPanel = renderChampionPanel(
-    `${opponentHeading}'s Champions`,
-    opponentLegend ?? null,
-    opponentLeader ?? null
-  );
-
-  const championSidebar = (
-    <aside className="arena-sidebar arena-sidebar--champions">
-      <div className="champion-stack">{opponentChampionPanel}</div>
-      <div className="champion-stack">{playerChampionPanel}</div>
-    </aside>
-  );
+  const deploymentOverlay =
+    pendingDeploymentCard && pendingDeployment != null
+      ? renderDeploymentModal(
+          pendingDeploymentCard,
+          (destinationId) => {
+            void handlePlayCard(pendingDeployment, destinationId, {
+              animateKey: pendingDeploymentKey,
+            });
+            setPendingDeployment(null);
+          },
+          () => setPendingDeployment(null)
+        )
+      : pendingLeaderDeployment && leaderCard
+        ? renderDeploymentModal(
+            leaderCard,
+            (destinationId) => {
+              void handleChampionLeaderDeploy(destinationId);
+              setPendingLeaderDeployment(false);
+            },
+            () => setPendingLeaderDeployment(false)
+          )
+        : null;
 
   const duelLogSidebar = (
     <aside className="arena-log-panel">
@@ -4256,9 +5445,13 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const boardView = (
     <>
       <div className="arena-layout">
-        {championSidebar}
+        <div className="arena-layout__column arena-layout__column--dock">
+          {championSpotlightSticky}
+          {championDock}
+        </div>
         <div className="arena-layout__main">
-          {matchInfoPanel}
+          {matchStatusClusterSticky}
+          {combatPriorityBanner}
           <div className="duel-stage">
             {renderPlayerZone('opponent')}
             <div className="arena-divider">
@@ -4295,53 +5488,10 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
             >
               {movingUnit ? 'Moving...' : 'Return to Base'}
             </button>
-          </div>
-        </section>
-      )}
-      {pendingDeploymentCard && pendingDeployment != null && (
-        <div className="deploy-overlay">
-          <div className="deploy-modal">
-            <h4>Deploy {pendingDeploymentCard.name ?? 'Unit'}</h4>
-            <p>Select where you would like to deploy this unit.</p>
-            <div className="deploy-options">
-              <button
-                type="button"
-                className="prompt-button secondary"
-                onClick={() => {
-                  void handlePlayCard(pendingDeployment, null, {
-                    animateKey: pendingDeploymentKey,
-                  });
-                  setPendingDeployment(null);
-                }}
-              >
-                Base
-              </button>
-              {controlledBattlefields.map((field) => (
-                  <button
-                    type="button"
-                    key={field.battlefieldId}
-                    className="prompt-button primary"
-                    onClick={() => {
-                      void handlePlayCard(pendingDeployment, field.battlefieldId, {
-                        animateKey: pendingDeploymentKey,
-                      });
-                      setPendingDeployment(null);
-                    }}
-                  >
-                    {field.name}
-                  </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              className="prompt-button danger"
-              onClick={() => setPendingDeployment(null)}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
+      </div>
+    </section>
+  )}
+      {deploymentOverlay}
       {actionMessage && (
         <AnnouncementModal
           message={actionMessage}
@@ -4350,6 +5500,16 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       )}
     </>
   );
+
+  const matchResultOverlay =
+    matchEnded && opponentNameForResult ? (
+      <MatchResultOverlay
+        didWin={playerWonMatch}
+        opponentName={opponentNameForResult}
+        reasonLabel={matchResultReasonLabel}
+        onReturn={handleReturnToQueue}
+      />
+    ) : null;
 
   const boardModeClass = showInitiativeScreen
     ? 'duel-mode'
@@ -4377,6 +5537,14 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           onSkip={handleKeepHand}
         />
       )}
+      {showConcedeConfirm && (
+        <ConcedeConfirmModal
+          loading={concedingMatch}
+          onConfirm={confirmConcede}
+          onCancel={cancelConcedePrompt}
+        />
+      )}
+      {matchResultOverlay}
     </div>
   );
 }

@@ -102,6 +102,12 @@ export const GET_MATCH = gql`
         message
         timestamp
       }
+      focusPlayerId
+      combatContext {
+        battlefieldId
+        initiatedBy
+        priorityStage
+      }
     }
   }
 `;
@@ -139,6 +145,12 @@ export const GET_PLAYER_MATCH = gql`
         turnNumber
         currentPlayerIndex
         canAct
+        focusPlayerId
+        combatContext {
+          battlefieldId
+          initiatedBy
+          priorityStage
+        }
       }
     }
   }
@@ -236,6 +248,12 @@ export const INIT_MATCH = gql`
         turnNumber
         currentPlayerIndex
         status
+        focusPlayerId
+        combatContext {
+          battlefieldId
+          initiatedBy
+          priorityStage
+        }
       }
     }
   }
@@ -283,6 +301,12 @@ export const SUBMIT_INITIATIVE_CHOICE = gql`
       battlefields {
         ...BattlefieldStateFields
       }
+      focusPlayerId
+      combatContext {
+        battlefieldId
+        initiatedBy
+        priorityStage
+      }
     }
   }
 `;
@@ -324,6 +348,12 @@ export const SUBMIT_MULLIGAN = gql`
       }
       battlefields {
         ...BattlefieldStateFields
+      }
+      focusPlayerId
+      combatContext {
+        battlefieldId
+        initiatedBy
+        priorityStage
       }
     }
   }
@@ -371,6 +401,12 @@ export const SELECT_BATTLEFIELD = gql`
       battlefields {
         ...BattlefieldStateFields
       }
+      focusPlayerId
+      combatContext {
+        battlefieldId
+        initiatedBy
+        priorityStage
+      }
     }
   }
 `;
@@ -402,6 +438,12 @@ export const PLAY_CARD = gql`
         turnNumber
         currentPlayerIndex
         status
+        focusPlayerId
+        combatContext {
+          battlefieldId
+          initiatedBy
+          priorityStage
+        }
       }
       currentPhase
     }
@@ -433,6 +475,12 @@ export const ATTACK = gql`
         turnNumber
         currentPlayerIndex
         status
+        focusPlayerId
+        combatContext {
+          battlefieldId
+          initiatedBy
+          priorityStage
+        }
       }
       currentPhase
     }
@@ -464,6 +512,49 @@ export const MOVE_UNIT = gql`
         turnNumber
         currentPlayerIndex
         status
+        focusPlayerId
+        combatContext {
+          battlefieldId
+          initiatedBy
+          priorityStage
+        }
+      }
+      currentPhase
+    }
+  }
+`;
+
+export const ACTIVATE_CHAMPION_POWER = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
+  mutation ActivateChampionAbility(
+    $matchId: ID!
+    $playerId: ID!
+    $target: String
+    $destinationId: String
+  ) {
+    activateChampionAbility(
+      matchId: $matchId
+      playerId: $playerId
+      target: $target
+      destinationId: $destinationId
+    ) {
+      success
+      gameState {
+        matchId
+        players {
+          ...PlayerStateFields
+        }
+        currentPhase
+        turnNumber
+        currentPlayerIndex
+        status
+        focusPlayerId
+        combatContext {
+          battlefieldId
+          initiatedBy
+          priorityStage
+        }
       }
       currentPhase
     }
@@ -485,6 +576,12 @@ export const NEXT_PHASE = gql`
         turnNumber
         currentPlayerIndex
         status
+        focusPlayerId
+        combatContext {
+          battlefieldId
+          initiatedBy
+          priorityStage
+        }
       }
       currentPhase
     }
@@ -520,6 +617,12 @@ export const RECORD_DUEL_LOG_ENTRY = gql`
         turnNumber
         currentPlayerIndex
         status
+        focusPlayerId
+        combatContext {
+          battlefieldId
+          initiatedBy
+          priorityStage
+        }
         duelLog {
           id
           message
@@ -549,12 +652,45 @@ export const SEND_CHAT_MESSAGE = gql`
         turnNumber
         currentPlayerIndex
         status
+        focusPlayerId
+        combatContext {
+          battlefieldId
+          initiatedBy
+          priorityStage
+        }
         chatLog {
           id
           playerId
           playerName
           message
           timestamp
+        }
+      }
+      currentPhase
+    }
+  }
+`;
+
+export const PASS_PRIORITY = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
+  mutation PassPriority($matchId: ID!, $playerId: ID!) {
+    passPriority(matchId: $matchId, playerId: $playerId) {
+      success
+      gameState {
+        matchId
+        players {
+          ...PlayerStateFields
+        }
+        currentPhase
+        turnNumber
+        currentPlayerIndex
+        status
+        focusPlayerId
+        combatContext {
+          battlefieldId
+          initiatedBy
+          priorityStage
         }
       }
       currentPhase
@@ -583,6 +719,12 @@ export const REPORT_MATCH_RESULT = gql`
         turns
         moves
       }
+      gameState {
+        matchId
+        status
+        winner
+        endReason
+      }
     }
   }
 `;
@@ -598,6 +740,12 @@ export const CONCEDE_MATCH = gql`
         reason
         duration
         turns
+      }
+      gameState {
+        matchId
+        status
+        winner
+        endReason
       }
     }
   }

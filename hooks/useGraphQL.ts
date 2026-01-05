@@ -17,6 +17,8 @@ import {
   SEND_CHAT_MESSAGE,
   REPORT_MATCH_RESULT,
   CONCEDE_MATCH,
+  PASS_PRIORITY,
+  ACTIVATE_CHAMPION_POWER,
   GET_CARD_CATALOG,
   GET_DECKLISTS,
   SAVE_DECKLIST,
@@ -134,12 +136,20 @@ export function useNextPhase() {
   return useMutation(NEXT_PHASE);
 }
 
+export function useActivateChampionPower() {
+  return useMutation(ACTIVATE_CHAMPION_POWER);
+}
+
 export function useRecordDuelLogEntry() {
   return useMutation(RECORD_DUEL_LOG_ENTRY);
 }
 
 export function useSendChatMessage() {
   return useMutation(SEND_CHAT_MESSAGE);
+}
+
+export function usePassPriority() {
+  return useMutation(PASS_PRIORITY);
 }
 
 export function useReportMatchResult() {

@@ -55,6 +55,7 @@ export const CARD_SNAPSHOT_FIELDS = gql`
       remote
       localPath
     }
+    isTapped
   }
 `
 
@@ -152,6 +153,26 @@ export const PLAYER_STATE_FIELDS = gql`
     championLeader {
       ...CardSnapshotFields
     }
+    championLegendState {
+      canActivate
+      reason
+      costSummary
+      cost {
+        energy
+        runes
+        exhausts
+      }
+    }
+    championLeaderState {
+      canActivate
+      reason
+      costSummary
+      cost {
+        energy
+        runes
+        exhausts
+      }
+    }
   }
 `
 
@@ -167,7 +188,12 @@ export const BATTLEFIELD_STATE_FIELDS = gql`
     lastConqueredTurn
     lastHoldTurn
     lastCombatTurn
-    lastCombatTurn
+    lastHoldScoreTurn
+    presence {
+      playerId
+      totalMight
+      unitCount
+    }
     card {
       ...CardSnapshotFields
     }

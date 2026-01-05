@@ -69,6 +69,12 @@ export const GAME_STATE_CHANGED = gql`
         message
         timestamp
       }
+      focusPlayerId
+      combatContext {
+        battlefieldId
+        initiatedBy
+        priorityStage
+      }
     }
   }
 `;
@@ -98,6 +104,12 @@ export const PLAYER_GAME_STATE_CHANGED = gql`
         turnNumber
         currentPlayerIndex
         canAct
+        focusPlayerId
+        combatContext {
+          battlefieldId
+          initiatedBy
+          priorityStage
+        }
       }
     }
   }
