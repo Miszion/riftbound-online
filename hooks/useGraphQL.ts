@@ -12,6 +12,7 @@ import {
   PLAY_CARD,
   ATTACK,
   MOVE_UNIT,
+  COMMENCE_BATTLE,
   NEXT_PHASE,
   RECORD_DUEL_LOG_ENTRY,
   SEND_CHAT_MESSAGE,
@@ -29,6 +30,8 @@ import {
   GET_MATCH_REPLAY,
   GET_RECENT_MATCHES,
   SUBMIT_MULLIGAN,
+  SUBMIT_DISCARD_SELECTION,
+  SUBMIT_TARGET_SELECTION,
   SELECT_BATTLEFIELD,
   SUBMIT_INITIATIVE_CHOICE,
 } from '@/lib/graphql/queries';
@@ -116,6 +119,14 @@ export function useSubmitMulligan() {
   return useMutation(SUBMIT_MULLIGAN);
 }
 
+export function useSubmitDiscardSelection() {
+  return useMutation(SUBMIT_DISCARD_SELECTION);
+}
+
+export function useSubmitTargetSelection() {
+  return useMutation(SUBMIT_TARGET_SELECTION);
+}
+
 export function useSelectBattlefield() {
   return useMutation(SELECT_BATTLEFIELD);
 }
@@ -130,6 +141,10 @@ export function useAttack() {
 
 export function useMoveUnit() {
   return useMutation(MOVE_UNIT);
+}
+
+export function useCommenceBattle() {
+  return useMutation(COMMENCE_BATTLE);
 }
 
 export function useNextPhase() {

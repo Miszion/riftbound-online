@@ -106,6 +106,9 @@ export const GET_MATCH = gql`
       combatContext {
         battlefieldId
         initiatedBy
+        defendingPlayerId
+        attackingUnitIds
+        defendingUnitIds
         priorityStage
       }
     }
@@ -149,6 +152,9 @@ export const GET_PLAYER_MATCH = gql`
         combatContext {
           battlefieldId
           initiatedBy
+          defendingPlayerId
+          attackingUnitIds
+          defendingUnitIds
           priorityStage
         }
       }
@@ -252,6 +258,9 @@ export const INIT_MATCH = gql`
         combatContext {
           battlefieldId
           initiatedBy
+          defendingPlayerId
+          attackingUnitIds
+          defendingUnitIds
           priorityStage
         }
       }
@@ -305,6 +314,9 @@ export const SUBMIT_INITIATIVE_CHOICE = gql`
       combatContext {
         battlefieldId
         initiatedBy
+        defendingPlayerId
+        attackingUnitIds
+        defendingUnitIds
         priorityStage
       }
     }
@@ -353,6 +365,132 @@ export const SUBMIT_MULLIGAN = gql`
       combatContext {
         battlefieldId
         initiatedBy
+        defendingPlayerId
+        attackingUnitIds
+        defendingUnitIds
+        priorityStage
+      }
+    }
+  }
+`;
+
+
+export const SUBMIT_DISCARD_SELECTION = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
+  ${CARD_SNAPSHOT_FIELDS}
+  ${BATTLEFIELD_STATE_FIELDS}
+  ${GAME_PROMPT_FIELDS}
+  ${PRIORITY_WINDOW_FIELDS}
+  mutation SubmitDiscardSelection(
+    $matchId: ID!
+    $playerId: ID!
+    $promptId: ID!
+    $cardInstanceIds: [ID!]!
+  ) {
+    submitDiscardSelection(
+      matchId: $matchId
+      playerId: $playerId
+      promptId: $promptId
+      cardInstanceIds: $cardInstanceIds
+    ) {
+      matchId
+      winner
+      victoryScore
+      endReason
+      players {
+        ...PlayerStateFields
+      }
+      currentPhase
+      turnNumber
+      currentPlayerIndex
+      status
+      timestamp
+      moveHistory
+      scoreLog {
+        playerId
+        amount
+        reason
+        sourceCardId
+        timestamp
+      }
+      prompts {
+        ...GamePromptFields
+      }
+      priorityWindow {
+        ...PriorityWindowFields
+      }
+      battlefields {
+        ...BattlefieldStateFields
+      }
+      focusPlayerId
+      combatContext {
+        battlefieldId
+        initiatedBy
+        defendingPlayerId
+        attackingUnitIds
+        defendingUnitIds
+        priorityStage
+      }
+    }
+  }
+`;
+
+export const SUBMIT_TARGET_SELECTION = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
+  ${CARD_SNAPSHOT_FIELDS}
+  ${BATTLEFIELD_STATE_FIELDS}
+  ${GAME_PROMPT_FIELDS}
+  ${PRIORITY_WINDOW_FIELDS}
+  mutation SubmitTargetSelection(
+    $matchId: ID!
+    $playerId: ID!
+    $promptId: ID!
+    $selectionIds: [ID!]!
+  ) {
+    submitTargetSelection(
+      matchId: $matchId
+      playerId: $playerId
+      promptId: $promptId
+      selectionIds: $selectionIds
+    ) {
+      matchId
+      winner
+      victoryScore
+      endReason
+      players {
+        ...PlayerStateFields
+      }
+      currentPhase
+      turnNumber
+      currentPlayerIndex
+      status
+      timestamp
+      moveHistory
+      scoreLog {
+        playerId
+        amount
+        reason
+        sourceCardId
+        timestamp
+      }
+      prompts {
+        ...GamePromptFields
+      }
+      priorityWindow {
+        ...PriorityWindowFields
+      }
+      battlefields {
+        ...BattlefieldStateFields
+      }
+      focusPlayerId
+      combatContext {
+        battlefieldId
+        initiatedBy
+        defendingPlayerId
+        attackingUnitIds
+        defendingUnitIds
         priorityStage
       }
     }
@@ -405,6 +543,9 @@ export const SELECT_BATTLEFIELD = gql`
       combatContext {
         battlefieldId
         initiatedBy
+        defendingPlayerId
+        attackingUnitIds
+        defendingUnitIds
         priorityStage
       }
     }
@@ -420,6 +561,7 @@ export const PLAY_CARD = gql`
     $cardIndex: Int!
     $targets: [String!]
     $destinationId: String
+    $useAccelerate: Boolean
   ) {
     playCard(
       matchId: $matchId
@@ -427,6 +569,7 @@ export const PLAY_CARD = gql`
       cardIndex: $cardIndex
       targets: $targets
       destinationId: $destinationId
+      useAccelerate: $useAccelerate
     ) {
       success
       gameState {
@@ -442,6 +585,9 @@ export const PLAY_CARD = gql`
         combatContext {
           battlefieldId
           initiatedBy
+          defendingPlayerId
+          attackingUnitIds
+          defendingUnitIds
           priorityStage
         }
       }
@@ -479,6 +625,9 @@ export const ATTACK = gql`
         combatContext {
           battlefieldId
           initiatedBy
+          defendingPlayerId
+          attackingUnitIds
+          defendingUnitIds
           priorityStage
         }
       }
@@ -516,6 +665,9 @@ export const MOVE_UNIT = gql`
         combatContext {
           battlefieldId
           initiatedBy
+          defendingPlayerId
+          attackingUnitIds
+          defendingUnitIds
           priorityStage
         }
       }
@@ -553,6 +705,39 @@ export const ACTIVATE_CHAMPION_POWER = gql`
         combatContext {
           battlefieldId
           initiatedBy
+          defendingPlayerId
+          attackingUnitIds
+          defendingUnitIds
+          priorityStage
+        }
+      }
+      currentPhase
+    }
+  }
+`;
+
+export const COMMENCE_BATTLE = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
+  mutation CommenceBattle($matchId: ID!, $playerId: ID!, $battlefieldId: ID!) {
+    commenceBattle(matchId: $matchId, playerId: $playerId, battlefieldId: $battlefieldId) {
+      success
+      gameState {
+        matchId
+        players {
+          ...PlayerStateFields
+        }
+        currentPhase
+        turnNumber
+        currentPlayerIndex
+        status
+        focusPlayerId
+        combatContext {
+          battlefieldId
+          initiatedBy
+          defendingPlayerId
+          attackingUnitIds
+          defendingUnitIds
           priorityStage
         }
       }
@@ -580,6 +765,9 @@ export const NEXT_PHASE = gql`
         combatContext {
           battlefieldId
           initiatedBy
+          defendingPlayerId
+          attackingUnitIds
+          defendingUnitIds
           priorityStage
         }
       }
@@ -621,6 +809,9 @@ export const RECORD_DUEL_LOG_ENTRY = gql`
         combatContext {
           battlefieldId
           initiatedBy
+          defendingPlayerId
+          attackingUnitIds
+          defendingUnitIds
           priorityStage
         }
         duelLog {
@@ -656,6 +847,9 @@ export const SEND_CHAT_MESSAGE = gql`
         combatContext {
           battlefieldId
           initiatedBy
+          defendingPlayerId
+          attackingUnitIds
+          defendingUnitIds
           priorityStage
         }
         chatLog {
@@ -690,6 +884,9 @@ export const PASS_PRIORITY = gql`
         combatContext {
           battlefieldId
           initiatedBy
+          defendingPlayerId
+          attackingUnitIds
+          defendingUnitIds
           priorityStage
         }
       }

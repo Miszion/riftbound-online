@@ -12,6 +12,20 @@ export const metadata: Metadata = {
   description: 'A fan-made landing page inspired by the Riftbound card game from League of Legends',
 }
 
+const themeInitScript = `
+!(function() {
+  try {
+    var storedTheme = localStorage.getItem('rift-theme');
+    var theme = storedTheme === 'light' || storedTheme === 'dark'
+      ? storedTheme
+      : (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    document.documentElement.dataset.theme = theme;
+  } catch (e) {
+    document.documentElement.dataset.theme = 'dark';
+  }
+})();
+`;
+
 export default function RootLayout({
   children,
 }: {
@@ -19,6 +33,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+      </head>
       <body>
         <Providers>
           <ToastProvider>

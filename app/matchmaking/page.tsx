@@ -554,17 +554,19 @@ function MatchmakingContent() {
             )}
             {decklists.length > 0 && (
               <>
-                <select
-                  value={selectedDeckId}
-                  onChange={(event) => setSelectedDeckId(event.target.value)}
-                >
-                  {decklists.map((deck) => (
-                    <option key={deck.deckId} value={deck.deckId}>
-                      {deck.name}
-                      {deck.isDefault ? ' (Default)' : ''}
-                    </option>
-                  ))}
-                </select>
+                <div className="deck-select-control">
+                  <select
+                    value={selectedDeckId}
+                    onChange={(event) => setSelectedDeckId(event.target.value)}
+                  >
+                    {decklists.map((deck) => (
+                      <option key={deck.deckId} value={deck.deckId}>
+                        {deck.name}
+                        {deck.isDefault ? ' (Default)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
                 {selectedDeck && (
                   <p className="muted small">
                     {selectedDeck.cardCount ?? 0} cards ·{' '}

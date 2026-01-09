@@ -18,9 +18,11 @@ import {
   usePlayerGameStateSubscription,
   usePlayCard,
   useMoveUnit,
+  useCommenceBattle,
   useNextPhase,
   useConcedeMatch,
   useSubmitMulligan,
+  useSubmitDiscardSelection,
   useSelectBattlefield,
   useSubmitInitiativeChoice,
   useCardPlayedSubscription,
@@ -30,6 +32,7 @@ import {
   useSendChatMessage,
   usePassPriority,
   useActivateChampionPower,
+  useSubmitTargetSelection,
 } from '@/hooks/useGraphQL';
 import type { ToastTone } from '@/components/ui/ToastStack';
 import useToasts from '@/hooks/useToasts';
@@ -37,6 +40,7 @@ import doransBladeImg from '@/public/images/dorans-blade.jpg';
 import doransShieldImg from '@/public/images/dorans-shield.jpg';
 import doransRingImg from '@/public/images/dorans-ring.jpg';
 import cardBackImg from '@/public/images/card-back.png';
+import recruitImg from '@/public/images/recruit.jpg';
 
 type CardAsset = {
   remote?: string | null;
@@ -57,6 +61,7 @@ type BaseCard = {
   currentToughness?: number | null;
   keywords?: string[] | null;
   tags?: string[] | null;
+  metadata?: Record<string, any> | null;
   text?: string | null;
   effect?: string | null;
   isTapped?: boolean | null;
@@ -228,8 +233,7 @@ const isTokenCardEntity = (card?: BaseCard | null) =>
   Boolean(
     card &&
       ((card.tags ?? []).some((tag) => tag?.toLowerCase() === 'token') ||
-        /token/i.test(card.name ?? '') ||
-        /token/i.test(card.text ?? ''))
+        /token/i.test(card.name ?? ''))
   );
 const resolveCardEffectText = (card?: BaseCard | null) => {
   if (!card) {
@@ -246,6 +250,79 @@ const isCardAtBase = (card?: BaseCard | null) => {
 const isCardOnBattlefield = (card?: BaseCard | null) => card?.location?.zone === 'battlefield';
 const filterBaseCards = (cards?: BaseCard[] | null) => (cards ?? []).filter(isCardAtBase);
 const filterBattlefieldCards = (cards?: BaseCard[] | null) => (cards ?? []).filter(isCardOnBattlefield);
+const cardHasMechanic = (card?: BaseCard | null, mechanic?: string | null) => {
+  if (!card || !mechanic) {
+    return false;
+  }
+  const normalized = mechanic.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  const matchesList = (values?: (string | null)[] | null) =>
+    (values ?? []).some((value) => (value ?? '').toLowerCase() === normalized);
+  if (matchesList(card.keywords) || matchesList(card.tags)) {
+    return true;
+  }
+  const effectText = resolveCardEffectText(card);
+  return effectText ? effectText.toLowerCase().includes(normalized) : false;
+};
+
+type AccelerateHint = {
+  energy: number;
+  rune?: string | null;
+};
+
+const capitalizeWord = (value?: string | null) => {
+  if (!value) {
+    return '';
+  }
+  return value.charAt(0).toUpperCase() + value.slice(1);
+};
+
+const getAccelerateHint = (card?: BaseCard | null): AccelerateHint | null => {
+  if (!card?.metadata || typeof card.metadata !== 'object') {
+    return null;
+  }
+  const payload = card.metadata as Record<string, unknown>;
+  const raw = payload.accelerateCost as { energy?: number; rune?: string } | undefined;
+  if (!raw) {
+    return null;
+  }
+  const energy = Number(raw.energy ?? 0);
+  if (!Number.isFinite(energy) || energy <= 0) {
+    return null;
+  }
+  const rune = typeof raw.rune === 'string' ? raw.rune : null;
+  return {
+    energy: Math.round(energy),
+    rune
+  };
+};
+
+const augmentCardForAccelerate = (card: BaseCard, hint: AccelerateHint): BaseCard => {
+  const augmentedPowerCost: Record<string, number | null> = { ...(card.powerCost ?? {}) };
+  if (hint.rune) {
+    const normalized = normalizeDomainKey(hint.rune);
+    if (normalized) {
+      const currentValue = Number(augmentedPowerCost[normalized] ?? 0);
+      augmentedPowerCost[normalized] = (Number.isFinite(currentValue) ? currentValue : 0) + 1;
+    }
+  }
+  const baseEnergy = Number(card.cost ?? 0);
+  return {
+    ...card,
+    cost: (Number.isFinite(baseEnergy) ? baseEnergy : 0) + hint.energy,
+    powerCost: augmentedPowerCost
+  };
+};
+
+const describeAccelerateCost = (hint: AccelerateHint): string => {
+  const parts = [`${hint.energy} extra energy`];
+  if (hint.rune) {
+    parts.push(`1 ${capitalizeWord(hint.rune)} rune`);
+  }
+  return parts.join(' and ');
+};
 
 const STANDARD_RUNE_DOMAINS = new Set(['fury', 'calm', 'mind', 'body', 'chaos', 'order']);
 
@@ -467,6 +544,9 @@ type CombatContextState = {
   battlefieldId: string;
   initiatedBy: string;
   priorityStage: 'action' | 'reaction';
+  defendingPlayerId?: string | null;
+  attackingUnitIds?: string[] | null;
+  defendingUnitIds?: string[] | null;
 };
 
 type BattlefieldPresence = {
@@ -486,6 +566,8 @@ type BattlefieldState = {
   lastHoldTurn?: number | null;
   lastCombatTurn?: number | null;
   lastHoldScoreTurn?: number | null;
+  combatTurnByPlayer?: Record<string, number | null> | null;
+  effectState?: Record<string, unknown> | null;
   card?: CardSnapshotLike | BaseCard | null;
   presence?: BattlefieldPresence[] | null;
 };
@@ -616,8 +698,7 @@ const MATCH_INIT_MAX_RETRIES = 20;
 const ARENA_SYNC_INTERVAL_MS = 2500;
 const CARD_ART_CDN = 'https://static.dotgg.gg/riftbound/cards';
 const RUNE_RECYCLE_DURATION_MS = 2600;
-const TOKEN_CARD_ART =
-  'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="400" height="560" viewBox="0 0 400 560"><defs><linearGradient id="tokenGradient" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="%23325675"/><stop offset="100%" stop-color="%2314283c"/></linearGradient></defs><rect width="100%" height="100%" rx="26" fill="url(%23tokenGradient)" stroke="%23fbbf24" stroke-width="6"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-family="Verdana" font-size="64" fill="%23fbbf24" opacity="0.85">TOKEN</text><text x="50%" y="70%" dominant-baseline="middle" text-anchor="middle" font-family="Verdana" font-size="28" fill="%23fcd34d" opacity="0.75">Unit</text></svg>';
+const TOKEN_CARD_ART = recruitImg.src;
 
 const normalizeTone = (value?: string | null): ToastTone => {
   const tone = (value ?? '').toLowerCase();
@@ -1107,9 +1188,9 @@ const CardTile: React.FC<CardTileProps> = ({
       {card?.cost !== undefined && (
         <div className="card-cost">{card.cost ?? 0}</div>
       )}
-      {statsAvailable && (
+      {card?.currentToughness && (
         <div className="card-stats">
-          {card?.power ?? 0}/{card?.currentToughness ?? card?.toughness ?? 0}
+          {card?.currentToughness}
         </div>
       )}
     </div>
@@ -1119,9 +1200,13 @@ const CardTile: React.FC<CardTileProps> = ({
 const GraveyardPile = ({
   cards,
   compact,
+  onClick,
+  ownerLabel,
 }: {
   cards: BaseCard[];
   compact?: boolean;
+  onClick?: () => void;
+  ownerLabel: string;
 }) => {
   const topCard = cards[cards.length - 1] ?? null;
   const total = cards.length;
@@ -1129,7 +1214,15 @@ const GraveyardPile = ({
   const topArt = topCard ? getCardImage(topCard) : null;
   const isEmpty = total === 0;
   return (
-    <div className={`graveyard-stack ${compact ? 'graveyard-stack--compact' : ''}`}>
+    <div
+      className={`graveyard-stack ${compact ? 'graveyard-stack--compact' : ''} ${
+        onClick ? 'graveyard-stack--interactive' : ''
+      }`}
+      onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      aria-label={`${ownerLabel} graveyard (${total})`}
+    >
       <div className="graveyard-stack__pile">
         {topArt ? (
           <img
@@ -1414,11 +1507,9 @@ const resolveRuneArt = (rune: RuneState) => {
 
 const RuneTokens = ({
   runes,
-  optimisticTaps,
   onHover,
 }: {
   runes: RuneState[];
-  optimisticTaps?: Set<string>;
   onHover?: CardHoverHandler;
 }) => {
   if (!runes.length) {
@@ -1429,8 +1520,7 @@ const RuneTokens = ({
       {runes.map((rune, index) => {
         const { art, card } = resolveRuneArt(rune);
         const instanceKey = runeInstanceKey(rune, index) ?? `${index}-${rune.runeId ?? rune.slug ?? 'rune'}`;
-        const exhausted =
-          Boolean(rune.isTapped ?? rune.tapped) || (instanceKey ? optimisticTaps?.has(instanceKey) : false);
+        const exhausted = Boolean(rune.isTapped ?? rune.tapped);
         const title = `${rune.name ?? 'Rune'} · ${rune.domain ?? 'Unknown'}`;
         return (
           <div
@@ -1688,25 +1778,210 @@ const MulliganModal = ({
   </div>
 );
 
-const AnnouncementModal = ({
-  message,
-  onClose,
-}: {
-  message: string;
-  onClose: () => void;
-}) => {
-  useEffect(() => {
-    const timer = setTimeout(onClose, 3500);
-    return () => clearTimeout(timer);
-  }, [onClose]);
-  return (
-    <div className="announcement-modal">
-      <div className="announcement-card">
-        <p>{message}</p>
-      </div>
-    </div>
-  );
+type DiscardModalProps = {
+  cards: BaseCard[];
+  selection: string[];
+  limit: number;
+  loading: boolean;
+  waitingMessage?: string | null;
+  sourceName?: string | null;
+  canConfirm: boolean;
+  onToggle: (instanceId: string) => void;
+  onConfirm: () => void;
 };
+
+const DiscardModal = ({
+  cards,
+  selection,
+  limit,
+  loading,
+  waitingMessage,
+  sourceName,
+  canConfirm,
+  onToggle,
+  onConfirm,
+}: DiscardModalProps) => (
+  <div className="modal-backdrop">
+    <div className="mulligan-modal" role="dialog" aria-modal="true">
+      {waitingMessage ? (
+        <div className="mulligan-waiting" role="status">
+          <span className="phase-spinner" aria-hidden="true" />
+          <p>{waitingMessage}</p>
+        </div>
+      ) : (
+        <>
+          <div className="mulligan-modal__header">
+            <div>
+              <p className="mulligan-modal__eyebrow">Discard</p>
+              <h3>Choose cards to discard</h3>
+              {sourceName && <p className="mulligan-source">Effect: {sourceName}</p>}
+            </div>
+            <div className="mulligan-modal__limit">
+              Discard {limit} card{limit === 1 ? '' : 's'}
+            </div>
+          </div>
+          <p className="mulligan-count">
+            Selected {selection.length} / {limit}
+            {selection.length === limit ? ' · Ready' : ''}
+          </p>
+          <div className="mulligan-card-grid">
+            {cards.map((card, index) => {
+              const instanceId = card.instanceId ?? `${card.cardId}-${index}`;
+              const isSelected = selection.includes(instanceId);
+              const disabled = loading;
+              const handleClick = () => {
+                if (!disabled) {
+                  onToggle(instanceId);
+                }
+              };
+              return (
+                <button
+                  key={resolveHandCardKey(card, index)}
+                  type="button"
+                  className={[
+                    'mulligan-card-button',
+                    isSelected ? 'mulligan-card-button--selected' : '',
+                    disabled ? 'mulligan-card-button--disabled' : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  onClick={handleClick}
+                  disabled={disabled}
+                >
+                  <CardTile
+                    card={card}
+                    widthPx={165}
+                    selectable={!disabled}
+                    isSelected={isSelected}
+                  />
+                  <span className="mulligan-card-button__tag">
+                    {isSelected ? 'Discard' : 'Keep'}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          <div className="mulligan-actions">
+            <button
+              type="button"
+              className="mulligan-action-button mulligan-action-button--primary"
+              onClick={onConfirm}
+              disabled={loading || !canConfirm}
+            >
+              {loading ? 'Submitting…' : 'Confirm Discard'}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  </div>
+);
+
+type TargetSelectionModalProps = {
+  cards: BaseCard[];
+  selection: string[];
+  min: number;
+  max: number;
+  loading: boolean;
+  waitingMessage?: string | null;
+  sourceName?: string | null;
+  scopeLabel: string;
+  canConfirm: boolean;
+  onToggle: (instanceId: string) => void;
+  onConfirm: () => void;
+};
+
+const TargetSelectionModal = ({
+  cards,
+  selection,
+  min,
+  max,
+  loading,
+  waitingMessage,
+  sourceName,
+  scopeLabel,
+  canConfirm,
+  onToggle,
+  onConfirm
+}: TargetSelectionModalProps) => (
+  <div className="modal-backdrop">
+    <div className="mulligan-modal" role="dialog" aria-modal="true">
+      {waitingMessage ? (
+        <div className="mulligan-waiting" role="status">
+          <span className="phase-spinner" aria-hidden="true" />
+          <p>{waitingMessage}</p>
+        </div>
+      ) : (
+        <>
+          <div className="mulligan-modal__header">
+            <div>
+              <p className="mulligan-modal__eyebrow">Targeting</p>
+              <h3>Select {scopeLabel}{scopeLabel.endsWith('s') ? '' : 's'}</h3>
+              {sourceName && <p className="mulligan-source">Effect: {sourceName}</p>}
+            </div>
+            <div className="mulligan-modal__limit">
+              Choose
+              {min === max
+                ? ` ${max}`
+                : ` ${min}${max ? `–${max}` : '+'}`} target
+              {max === 1 ? '' : 's'}
+            </div>
+          </div>
+          <p className="mulligan-count">
+            Selected {selection.length}
+            {max ? ` / ${max}` : ''}
+          </p>
+          <div className="mulligan-card-grid">
+            {cards.length === 0 ? (
+              <div className="mulligan-source">No valid targets available.</div>
+            ) : (
+              cards.map((card, index) => {
+                const instanceId = card.instanceId ?? `${card.cardId}-${index}`;
+                const isSelected = selection.includes(instanceId);
+                const disabled = loading;
+                const handleClick = () => {
+                  if (!disabled) {
+                    onToggle(instanceId);
+                  }
+                };
+                return (
+                  <button
+                    key={`${card.cardId}-${instanceId}-${index}`}
+                    type="button"
+                    className={[
+                      'mulligan-card-button',
+                      isSelected ? 'mulligan-card-button--selected' : '',
+                      disabled ? 'mulligan-card-button--disabled' : ''
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
+                    onClick={handleClick}
+                    disabled={disabled}
+                  >
+                    <CardTile card={card} widthPx={165} selectable={!disabled} isSelected={isSelected} />
+                    <span className="mulligan-card-button__tag">
+                      {isSelected ? 'Selected' : 'Target'}
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+          <div className="mulligan-actions">
+            <button
+              type="button"
+              className="mulligan-action-button mulligan-action-button--primary"
+              onClick={onConfirm}
+              disabled={loading || !canConfirm || cards.length === 0}
+            >
+              {loading ? 'Submitting…' : 'Confirm Targets'}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  </div>
+);
 
 const ConcedeConfirmModal = ({
   loading,
@@ -1744,6 +2019,7 @@ const ConcedeConfirmModal = ({
 );
 
 const CONFETTI_COLORS = ['#F87171', '#34D399', '#60A5FA', '#FBBF24', '#F472B6', '#FCD34D'];
+const RAINDROP_COLORS = ['rgba(59,130,246,0.65)', 'rgba(37,99,235,0.6)', 'rgba(96,165,250,0.5)'];
 
 const ConfettiBurst = () => (
   <div className="match-confetti" aria-hidden="true">
@@ -1759,6 +2035,31 @@ const ConfettiBurst = () => (
             left: `${left}%`,
             animationDelay: `${delay}s`,
             backgroundColor: color,
+          }}
+        />
+      );
+    })}
+  </div>
+);
+
+const RaindropShower = () => (
+  <div className="match-raindrops" aria-hidden="true">
+    {Array.from({ length: 20 }).map((_, index) => {
+      const left = (index / 20) * 100;
+      const delay = (index % 5) * 0.2;
+      const duration = 2.5 + (index % 4) * 0.35;
+      const dropHeight = 18 + (index % 6) * 4;
+      const color = RAINDROP_COLORS[index % RAINDROP_COLORS.length];
+      return (
+        <span
+          key={`raindrop-${index}`}
+          className="match-raindrops__drop"
+          style={{
+            left: `${left}%`,
+            animationDelay: `${delay}s`,
+            animationDuration: `${duration}s`,
+            height: `${dropHeight}px`,
+            background: color,
           }}
         />
       );
@@ -1802,7 +2103,7 @@ const MatchResultOverlay = ({
       .filter(Boolean)
       .join(' ')}
   >
-    {didWin ? <ConfettiBurst /> : null}
+    {didWin ? <ConfettiBurst /> : <RaindropShower />}
     <div className="match-result-overlay__panel" role="dialog" aria-modal="true">
       <h3>{didWin ? 'Victory!' : 'Defeat'}</h3>
       <p>
@@ -1864,10 +2165,15 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const [playCard, { loading: playingCard }] = usePlayCard();
   const [moveUnit, { loading: movingUnit }] = useMoveUnit();
+  const [commenceBattleMutation, { loading: commencingBattle }] = useCommenceBattle();
   const [nextPhase, { loading: advancingPhase }] = useNextPhase();
   const [concedeMatch] = useConcedeMatch();
   const [submitMulligan, { loading: submittingMulligan }] =
     useSubmitMulligan();
+  const [submitDiscardSelection, { loading: submittingDiscardSelection }] =
+    useSubmitDiscardSelection();
+  const [submitTargetSelection, { loading: submittingTargetSelection }] =
+    useSubmitTargetSelection();
   const [selectBattlefield, { loading: selectingBattlefield }] =
     useSelectBattlefield();
   const [
@@ -1891,14 +2197,21 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     setBattlefieldAdvanceComplete(false);
     runeCountRefs.current = { self: 0, opponent: 0 };
     runeInitRefs.current = { self: false, opponent: false };
-    setOptimisticRuneTaps(new Set());
-    Object.values(runeTapTimeouts.current).forEach((timeout) => clearTimeout(timeout));
-    runeTapTimeouts.current = {};
+    setOptimisticUnitTaps(new Set());
+    setBattlefieldMoveIntents(new Map());
   }, [matchId]);
   const [mulliganSelection, setMulliganSelection] = useState<number[]>([]);
+  const [discardSelection, setDiscardSelection] = useState<string[]>([]);
+  const [targetSelection, setTargetSelection] = useState<string[]>([]);
   const [selectedUnit, setSelectedUnit] = useState<string | null>(null);
   const [pendingDeployment, setPendingDeployment] = useState<number | null>(null);
   const [pendingLeaderDeployment, setPendingLeaderDeployment] = useState(false);
+  const [commencingBattlefieldId, setCommencingBattlefieldId] = useState<string | null>(null);
+  const [optimisticUnitTaps, setOptimisticUnitTaps] = useState<Set<string>>(new Set());
+  const optimisticTapCount = optimisticUnitTaps.size;
+  const [battlefieldMoveIntents, setBattlefieldMoveIntents] = useState<Map<string, string>>(
+    () => new Map()
+  );
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [sawMulliganPhase, setSawMulliganPhase] = useState(false);
   const [mulliganCompleteNotified, setMulliganCompleteNotified] = useState(false);
@@ -1932,8 +2245,6 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   }, [spotlightCard, spotlightForceUpright]);
   const [championFocus, setChampionFocus] = useState<'opponent' | 'self'>('opponent');
   const handAnimationTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  const [optimisticRuneTaps, setOptimisticRuneTaps] = useState<Set<string>>(new Set());
-  const runeTapTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const duelLogCounter = useRef(0);
   const autoMulliganRef = useRef(false);
   const selfZoneRef = useRef<HTMLElement | null>(null);
@@ -1943,8 +2254,6 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     return () => {
       Object.values(handAnimationTimeouts.current).forEach((timeout) => clearTimeout(timeout));
       handAnimationTimeouts.current = {};
-      Object.values(runeTapTimeouts.current).forEach((timeout) => clearTimeout(timeout));
-      runeTapTimeouts.current = {};
     };
   }, []);
   useEffect(() => {
@@ -2064,56 +2373,6 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     setSpotlightForceUpright(Boolean(card && options?.displayUntapped));
   }, []);
 
-  const getMobilizationRestriction = useCallback((card?: BaseCard | null) => {
-    if (!card) {
-      return 'Select a unit to move.';
-    }
-    if (Boolean(card.isTapped ?? card.tapped)) {
-      return 'Exhausted units must finish the Awaken step before moving.';
-    }
-    if (card.summoned) {
-      return 'Units cannot move on the turn they enter play.';
-    }
-    return null;
-  }, []);
-
-  const canMobilizeUnit = useCallback(
-    (card?: BaseCard | null) => {
-      if (!card?.instanceId || !isCreatureCard(card)) {
-        return false;
-      }
-      return !getMobilizationRestriction(card);
-    },
-    [getMobilizationRestriction]
-  );
-  const triggerHandAnimation = useCallback((key?: string | null) => {
-    if (!key) {
-      return;
-    }
-    setHandPlayAnimations((prev) => {
-      if (prev.has(key)) {
-        return prev;
-      }
-      const next = new Set(prev);
-      next.add(key);
-      return next;
-    });
-    const pendingTimeout = handAnimationTimeouts.current[key];
-    if (pendingTimeout) {
-      clearTimeout(pendingTimeout);
-    }
-    handAnimationTimeouts.current[key] = setTimeout(() => {
-      setHandPlayAnimations((prev) => {
-        if (!prev.has(key)) {
-          return prev;
-        }
-        const next = new Set(prev);
-        next.delete(key);
-        return next;
-      });
-      delete handAnimationTimeouts.current[key];
-    }, 420);
-  }, []);
   const runeCountRefs = useRef({ self: 0, opponent: 0 });
   const runeInitRefs = useRef({ self: false, opponent: false });
   const lastTurnHolderRef = useRef<string | null>(null);
@@ -2191,6 +2450,125 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     latestSpectatorState ??
     spectatorSnapshot ??
     undefined;
+
+  const battlefields = spectatorState?.battlefields ?? [];
+  const currentTurnNumber = spectatorState?.turnNumber ?? null;
+  useEffect(() => {
+    if (currentTurnNumber === null) {
+      return;
+    }
+    setBattlefieldMoveIntents(new Map());
+  }, [currentTurnNumber, playerId]);
+  const battlefieldsWithPendingMovement = useMemo(() => {
+    const pending = new Set<string>();
+    battlefieldMoveIntents.forEach((fieldId) => {
+      if (fieldId) {
+        pending.add(fieldId);
+      }
+    });
+    return pending;
+  }, [battlefieldMoveIntents]);
+  const battlefieldLocks = useMemo(() => {
+    const locks = new Map<string, string>();
+    if (!playerId || currentTurnNumber === null) {
+      return locks;
+    }
+    battlefields.forEach((field) => {
+      const record = field.combatTurnByPlayer ?? null;
+      const recordedTurn =
+        record && Object.prototype.hasOwnProperty.call(record, playerId)
+          ? record[playerId] ?? null
+          : null;
+      if (typeof recordedTurn === 'number' && recordedTurn === currentTurnNumber) {
+        locks.set(field.battlefieldId, 'You already battled on this battlefield this turn.');
+      }
+    });
+    return locks;
+  }, [battlefields, currentTurnNumber, playerId]);
+  const getBattlefieldLockReason = useCallback(
+    (battlefieldId: string) => battlefieldLocks.get(battlefieldId) ?? null,
+    [battlefieldLocks]
+  );
+
+  const getMobilizationRestriction = useCallback((card?: BaseCard | null) => {
+    if (!card) {
+      return 'Select a unit to move.';
+    }
+    if (Boolean(card.isTapped ?? card.tapped)) {
+      return 'Exhausted units must finish the Awaken step before moving.';
+    }
+    if (card.summoned) {
+      return 'Units cannot move on the turn they enter play.';
+    }
+    return null;
+  }, []);
+
+  const canMobilizeUnit = useCallback(
+    (card?: BaseCard | null) => {
+      if (!card?.instanceId || !isCreatureCard(card)) {
+        return false;
+      }
+      return !getMobilizationRestriction(card);
+    },
+    [getMobilizationRestriction]
+  );
+  const canUnitReturnToBase = useCallback(
+    (card?: BaseCard | null) =>
+      Boolean(card && isCardOnBattlefield(card) && canMobilizeUnit(card)),
+    [canMobilizeUnit]
+  );
+  const canUnitEnterBattlefield = useCallback(
+    (card: BaseCard | null, battlefieldId: string) => {
+      if (!card || !card.instanceId || !canMobilizeUnit(card)) {
+        return false;
+      }
+      if (getBattlefieldLockReason(battlefieldId)) {
+        return false;
+      }
+      if (isCardAtBase(card)) {
+        return true;
+      }
+      if (!isCardOnBattlefield(card)) {
+        return false;
+      }
+      if (!cardHasMechanic(card, 'ganking')) {
+        return false;
+      }
+      return card.location?.battlefieldId !== battlefieldId;
+    },
+    [canMobilizeUnit, getBattlefieldLockReason]
+  );
+  const triggerHandAnimation = useCallback((key?: string | null) => {
+    if (!key) {
+      return;
+    }
+    setHandPlayAnimations((prev) => {
+      if (prev.has(key)) {
+        return prev;
+      }
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+    const pendingTimeout = handAnimationTimeouts.current[key];
+    if (pendingTimeout) {
+      clearTimeout(pendingTimeout);
+    }
+    handAnimationTimeouts.current[key] = setTimeout(() => {
+      setHandPlayAnimations((prev) => {
+        if (!prev.has(key)) {
+          return prev;
+        }
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+      delete handAnimationTimeouts.current[key];
+    }, 420);
+  }, []);
+
+
+
   const refreshArenaState = useCallback(async () => {
     if (refreshInFlightRef.current) {
       return refreshInFlightRef.current;
@@ -2227,6 +2605,40 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     rawCurrentPlayer ?? EMPTY_PLAYER_STATE;
   const playerCreatures: BaseCard[] =
     rawCurrentPlayer?.board?.creatures ?? [];
+  const playerHandCount = currentPlayer.hand.length;
+  useEffect(() => {
+    if (!optimisticTapCount) {
+      return;
+    }
+    setOptimisticUnitTaps((prev) => {
+      if (!prev.size) {
+        return prev;
+      }
+      const cardsById = new Map<string, BaseCard>();
+      playerCreatures.forEach((card) => {
+        if (card.instanceId) {
+          cardsById.set(card.instanceId, card);
+        }
+      });
+      let changed = false;
+      const next = new Set(prev);
+      prev.forEach((instanceId) => {
+        const card = cardsById.get(instanceId);
+        if (!card) {
+          next.delete(instanceId);
+          changed = true;
+          return;
+        }
+        const tapped = Boolean(card.isTapped ?? card.tapped);
+        const onBattlefield = card.location?.zone === 'battlefield';
+        if (tapped || (onBattlefield && !tapped)) {
+          next.delete(instanceId);
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [optimisticTapCount, playerCreatures]);
   const moveUnitToLocation = useCallback(
     async (unitId: string, destinationId: string) => {
       const unitCard = playerCreatures.find((card) => card.instanceId === unitId);
@@ -2251,14 +2663,41 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         const moveMessage =
           destinationId === 'base' ? 'Unit returned to base.' : 'Unit moved to battlefield.';
         notify(moveMessage, 'success', { banner: true });
+        setBattlefieldMoveIntents((prev) => {
+          const updated = new Map(prev);
+          if (destinationId === 'base') {
+            if (!updated.delete(unitId)) {
+              return prev;
+            }
+            return updated;
+          }
+          const existing = updated.get(unitId);
+          if (existing === destinationId) {
+            return prev;
+          }
+          updated.set(unitId, destinationId);
+          return updated;
+        });
         setSelectedUnit(null);
       } catch (error) {
         console.error('Failed to move unit', error);
-        notify('Unable to move unit.', 'error', { banner: true });
+        const fallbackMessage =
+          error instanceof Error && error.message ? error.message : 'Unable to move unit.';
+        notify(fallbackMessage, 'error', { banner: true });
       }
     },
-    [canMobilizeUnit, matchId, moveUnit, notify, playerCreatures, playerId, setSelectedUnit]
+    [
+      canMobilizeUnit,
+      matchId,
+      moveUnit,
+      notify,
+      playerCreatures,
+      playerId,
+      setBattlefieldMoveIntents,
+      setSelectedUnit
+    ]
   );
+
   const playerDeckCount = rawCurrentPlayer?.deckCount ?? 0;
   const handleUnitDragStart = useCallback(
     (card: BaseCard, _event?: React.DragEvent<HTMLDivElement>) => {
@@ -2274,6 +2713,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     (_card?: BaseCard, _event?: React.DragEvent<HTMLDivElement>) => {
       setDraggingUnitId(null);
       setDragOverBattlefieldId(null);
+      setBoardDragHover(false);
     },
     []
   );
@@ -2281,6 +2721,11 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     () =>
       playerCreatures.find((card) => card.instanceId === selectedUnit) ?? null,
     [playerCreatures, selectedUnit]
+  );
+  const draggingUnitCard = useMemo(
+    () =>
+      playerCreatures.find((card) => card.instanceId === draggingUnitId) ?? null,
+    [playerCreatures, draggingUnitId]
   );
 
   const opponent: OpponentSummary | undefined = playerView?.opponent ?? undefined;
@@ -2393,6 +2838,17 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const combatPriorityHolderName = resolvePlayerLabel(focusPlayerIdState, 'Opponent');
   const opponentPlayerId = spectatorOpponent?.playerId ?? opponent?.playerId ?? null;
   const opponentDeckCount = spectatorOpponent?.deckCount ?? 0;
+  const opponentBoardState: PlayerBoardState =
+    spectatorOpponent?.board ??
+    playerView?.opponent?.board ?? {
+      creatures: [],
+      artifacts: [],
+      enchantments: [],
+    };
+  const opponentCreatures = opponentBoardState.creatures ?? [];
+  const opponentGraveyard = spectatorOpponent?.graveyard ?? [];
+  const playerGraveyard =
+    spectatorSelf?.graveyard ?? rawCurrentPlayer?.graveyard ?? [];
 
   const isLoading =
     (!playerView && playerLoading) || (!spectatorState && spectatorLoading);
@@ -2603,7 +3059,6 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       ),
     [opponentPlayerId, unresolvedMulliganPrompts]
   );
-
   const battlefieldPrompts = useMemo(
     () => prompts.filter((prompt) => prompt.type === 'battlefield'),
     [prompts]
@@ -2612,6 +3067,90 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     () => prompts.filter((prompt) => prompt.type === 'coin_flip'),
     [prompts]
   );
+  const discardPrompts = useMemo(
+    () => prompts.filter((prompt) => prompt.type === 'discard'),
+    [prompts]
+  );
+  const targetPrompts = useMemo(
+    () => prompts.filter((prompt) => prompt.type === 'target'),
+    [prompts]
+  );
+  const playerDiscardPrompt =
+    discardPrompts.find((prompt) => prompt.playerId === playerId && !prompt.resolved) ?? null;
+  const opponentDiscardPending = useMemo(
+    () =>
+      Boolean(
+        opponentPlayerId &&
+          discardPrompts.some((prompt) => prompt.playerId === opponentPlayerId && !prompt.resolved)
+      ),
+    [discardPrompts, opponentPlayerId]
+  );
+  const discardLimit = playerDiscardPrompt
+    ? Math.max(1, Number(playerDiscardPrompt.data?.count ?? 1))
+    : 1;
+  const playerTargetPrompt =
+    targetPrompts.find((prompt) => prompt.playerId === playerId && !prompt.resolved) ?? null;
+  const opponentTargetPending = useMemo(
+    () =>
+      Boolean(
+        opponentPlayerId &&
+          targetPrompts.some((prompt) => prompt.playerId === opponentPlayerId && !prompt.resolved)
+      ),
+    [opponentPlayerId, targetPrompts]
+  );
+
+  const targetScope = (playerTargetPrompt?.data?.scope as string) ?? 'unit';
+  const targetSelectionMax = playerTargetPrompt
+    ? Math.max(1, Number(playerTargetPrompt.data?.max ?? 1))
+    : 0;
+  const targetSelectionMin = playerTargetPrompt
+    ? Math.max(0, Number(playerTargetPrompt.data?.min ?? 1))
+    : 0;
+  const targetMaxForDisplay = playerTargetPrompt
+    ? Math.max(targetSelectionMax, targetSelectionMin || 1)
+    : 0;
+  const targetSourceName =
+    (playerTargetPrompt?.data?.sourceCardName as string | undefined) ?? null;
+  const targetAllowFriendly = playerTargetPrompt?.data?.allowFriendly !== false;
+  const targetAllowOpponent = playerTargetPrompt?.data?.allowOpponent !== false;
+  const targetCandidates = useMemo(() => {
+    if (!playerTargetPrompt) {
+      return [];
+    }
+    if (targetScope === 'graveyard') {
+      return playerGraveyard;
+    }
+    if (targetScope === 'unit') {
+      const friendly = targetAllowFriendly ? playerCreatures : [];
+      const enemy = targetAllowOpponent ? opponentCreatures : [];
+      return [...friendly, ...enemy];
+    }
+    return [];
+  }, [
+    opponentCreatures,
+    playerCreatures,
+    playerGraveyard,
+    playerTargetPrompt,
+    targetAllowFriendly,
+    targetAllowOpponent,
+    targetScope
+  ]);
+  const canConfirmTarget =
+    Boolean(playerTargetPrompt) &&
+    (targetSelectionMin <= 0 || targetSelection.length >= targetSelectionMin) &&
+    (targetSelectionMax === 0 || targetSelection.length <= targetSelectionMax);
+
+  useEffect(() => {
+    if (!playerDiscardPrompt) {
+      setDiscardSelection([]);
+    }
+  }, [playerDiscardPrompt]);
+
+  useEffect(() => {
+    if (!playerTargetPrompt) {
+      setTargetSelection([]);
+    }
+  }, [playerTargetPrompt]);
   const opponentCoinFlipPrompt = useMemo(() => {
     if (!opponentPlayerId) {
       return null;
@@ -2744,13 +3283,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     lastCoinFlipPromptIdRef.current = currentPromptId;
   }, [coinFlipPrompt?.id, playerInitiativeLocked]);
 
-  const canMoveSelectedToBase =
-    Boolean(
-      selectedUnitCard &&
-        selectedUnitCard.location &&
-        selectedUnitCard.location.zone === 'battlefield' &&
-        canMobilizeUnit(selectedUnitCard)
-    );
+  const canMoveSelectedToBase = canUnitReturnToBase(selectedUnitCard);
 
   const [legendCard, leaderCard] = useMemo(() => {
     const snapshotLegend = convertChampionSnapshot(rawCurrentPlayer?.championLegend, {
@@ -2796,7 +3329,6 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     leaderCard && currentPlayer.championLeaderState?.canActivate
   );
 
-  const battlefields = spectatorState?.battlefields ?? [];
   const controlledBattlefields = useMemo(
     () => battlefields.filter((field) => field.controller === playerId),
     [battlefields, playerId]
@@ -2814,6 +3346,120 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const isCoinFlipPhase = rawStatus === 'coin_flip';
   const isBattlefieldPhaseActive = rawStatus === 'battlefield_selection';
   const canAct = Boolean(flow?.canAct);
+
+  const registerOptimisticUnitTaps = useCallback((unitIds: (string | null | undefined)[]) => {
+    const keys = unitIds.filter((id): id is string => Boolean(id));
+    if (!keys.length) {
+      return () => {};
+    }
+    setOptimisticUnitTaps((prev) => {
+      const next = new Set(prev);
+      keys.forEach((key) => next.add(key));
+      return next;
+    });
+    return () => {
+      setOptimisticUnitTaps((prev) => {
+        if (!prev.size) {
+          return prev;
+        }
+        let changed = false;
+        const next = new Set(prev);
+        keys.forEach((key) => {
+          if (next.delete(key)) {
+            changed = true;
+          }
+        });
+        return changed ? next : prev;
+      });
+    };
+  }, []);
+
+  const commenceBattle = useCallback(
+    async (battlefieldId: string) => {
+      if (!canAct) {
+        notify('You cannot commence combat right now.', 'info', { banner: true });
+        return;
+      }
+      if (combatContext) {
+        notify('Resolve the current combat before starting another.', 'warning', { banner: true });
+        return;
+      }
+      const lockReason = getBattlefieldLockReason(battlefieldId);
+      if (lockReason) {
+        notify(lockReason, 'warning', { banner: true });
+        return;
+      }
+      const friendlyBattlefieldUnitIds = Array.from(
+        new Set(
+          playerCreatures
+            .filter(
+              (card) =>
+                card.instanceId &&
+                isCardOnBattlefield(card) &&
+                card.location?.battlefieldId === battlefieldId
+            )
+            .map((card) => card.instanceId)
+            .filter((id): id is string => Boolean(id))
+            .concat(
+              Array.from(battlefieldMoveIntents.entries())
+                .filter(([, fieldId]) => fieldId === battlefieldId)
+                .map(([unitId]) => unitId)
+            )
+        )
+      );
+      const rollbackUnitTaps = registerOptimisticUnitTaps(friendlyBattlefieldUnitIds);
+      setCommencingBattlefieldId(battlefieldId);
+      try {
+        await commenceBattleMutation({
+          variables: {
+            matchId,
+            playerId,
+            battlefieldId
+          }
+        });
+        notify('Combat engagement initiated.', 'success', { banner: true });
+        await refreshArenaState();
+        setBattlefieldMoveIntents((prev) => {
+          let changed = false;
+          const updated = new Map(prev);
+          prev.forEach((fieldId, unitKey) => {
+            if (fieldId === battlefieldId) {
+              updated.delete(unitKey);
+              changed = true;
+            }
+          });
+          return changed ? updated : prev;
+        });
+      } catch (error) {
+        rollbackUnitTaps();
+        console.error('Failed to commence battle', error);
+        const fallbackMessage =
+          error instanceof Error && error.message
+            ? error.message
+            : 'Unable to commence battle.';
+        notify(fallbackMessage, 'error', { banner: true });
+      } finally {
+        setCommencingBattlefieldId((previous) =>
+          previous === battlefieldId ? null : previous
+        );
+      }
+    },
+    [
+      canAct,
+      combatContext,
+      commenceBattleMutation,
+      getBattlefieldLockReason,
+      matchId,
+      notify,
+      playerCreatures,
+      playerId,
+      setBattlefieldMoveIntents,
+      registerOptimisticUnitTaps,
+      battlefieldMoveIntents,
+      refreshArenaState
+    ]
+  );
+
   const activeTurnPlayerId = useMemo(() => {
     if (
       typeof flow?.currentPlayerIndex === 'number' &&
@@ -2846,7 +3492,9 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       setPendingLeaderDeployment(false);
     }
   }, [pendingLeaderDeployment, playerLeaderReady]);
-  const canAdvancePhase = canAct && rawStatus === 'in_progress';
+  const hasAdvancePhasePrompt = Boolean(playerDiscardPrompt || playerTargetPrompt);
+  const canAdvancePhase =
+    canAct && rawStatus === 'in_progress' && !hasAdvancePhasePrompt && !isCombatPromptActive;
   const awaitingInitiativeResolution =
     rawStatus === 'coin_flip' &&
     !coinFlipPrompt &&
@@ -2953,46 +3601,6 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const playerRunes = playerChanneledRunes;
   const opponentRunes = opponentChanneledRunes;
-
-  const registerOptimisticRuneTaps = useCallback(
-    (indices: number[]) => {
-      if (!indices.length) {
-        return;
-      }
-      const tapKeys = indices
-        .map((index) => runeInstanceKey(playerRunes[index], index))
-        .filter((key): key is string => Boolean(key));
-      if (!tapKeys.length) {
-        return;
-      }
-      setOptimisticRuneTaps((prev) => {
-        const next = new Set(prev);
-        tapKeys.forEach((key) => next.add(key));
-        return next;
-      });
-      tapKeys.forEach((key) => {
-        if (!key) {
-          return;
-        }
-        const existing = runeTapTimeouts.current[key];
-        if (existing) {
-          clearTimeout(existing);
-        }
-        runeTapTimeouts.current[key] = setTimeout(() => {
-          setOptimisticRuneTaps((prev) => {
-            if (!prev.has(key)) {
-              return prev;
-            }
-            const next = new Set(prev);
-            next.delete(key);
-            return next;
-          });
-          delete runeTapTimeouts.current[key];
-        }, 1200);
-      });
-    },
-    [playerRunes]
-  );
 
   const [recycledRunes, setRecycledRunes] = useState<RecycledRuneEvent[]>([]);
   const registerRuneRecycling = useCallback(
@@ -3121,16 +3729,29 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       if (!card) {
         return;
       }
-      const runePlan = evaluateRunePayment(card, playerRunes);
+      const accelerateHint = getAccelerateHint(card);
+      let useAccelerate = false;
+      let paymentCard = card;
+      if (accelerateHint) {
+        const acceleratedCard = augmentCardForAccelerate(card, accelerateHint);
+        const acceleratePlan = evaluateRunePayment(acceleratedCard, playerRunes);
+        if (acceleratePlan.canPay && typeof window !== 'undefined') {
+          const promptMessage = `${card.name ?? 'This unit'} has Accelerate.\nPay ${describeAccelerateCost(
+            accelerateHint
+          )} to have it enter ready?`;
+          useAccelerate = window.confirm(promptMessage);
+          if (useAccelerate) {
+            paymentCard = acceleratedCard;
+          }
+        }
+      }
+      const runePlan = evaluateRunePayment(paymentCard, playerRunes);
       if (!runePlan.canPay) {
         notify('Insufficient runes to play this card.', 'warning', { banner: true });
         return;
       }
       if (options?.animateKey) {
         triggerHandAnimation(options.animateKey);
-      }
-      if (runePlan.runeIndices.length) {
-        registerOptimisticRuneTaps(runePlan.runeIndices);
       }
       try {
         await playCard({
@@ -3139,6 +3760,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
             playerId,
             cardIndex,
             destinationId: destinationId ?? null,
+            useAccelerate: useAccelerate ? true : undefined,
           },
         });
         notify('Card played.', 'success', { banner: true });
@@ -3157,7 +3779,6 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       playerId,
       playerRunes,
       refreshArenaState,
-      registerOptimisticRuneTaps,
       triggerHandAnimation,
     ]
   );
@@ -3176,9 +3797,6 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       if (!runePlan.canPay) {
         notify('Insufficient runes to deploy your leader.', 'warning', { banner: true });
         return;
-      }
-      if (runePlan.runeIndices.length) {
-        registerOptimisticRuneTaps(runePlan.runeIndices);
       }
       try {
         await activateChampionPower({
@@ -3207,7 +3825,6 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       playerLeaderReady,
       playerRunes,
       refreshArenaState,
-      registerOptimisticRuneTaps,
     ]
   );
 
@@ -3245,11 +3862,14 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       if (!draggingUnitId && !draggingLeader) {
         return;
       }
+      if (draggingUnitId && !canUnitEnterBattlefield(draggingUnitCard, battlefieldId)) {
+        return;
+      }
       event.preventDefault();
       event.dataTransfer.dropEffect = 'move';
       setDragOverBattlefieldId((previous) => (previous === battlefieldId ? previous : battlefieldId));
     },
-    [draggingLeader, draggingUnitId]
+    [canUnitEnterBattlefield, draggingLeader, draggingUnitCard, draggingUnitId]
   );
 
   const handleBattlefieldDragLeave = useCallback(
@@ -3273,10 +3893,21 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         return;
       }
       event.preventDefault();
+      const lockReason = getBattlefieldLockReason(battlefieldId);
+      if (lockReason) {
+        notify(lockReason, 'warning', { banner: true });
+        setDragOverBattlefieldId(null);
+        return;
+      }
       if (draggingUnitId) {
         const unitId = draggingUnitId;
+        const movingCard = draggingUnitCard;
         setDraggingUnitId(null);
         setDragOverBattlefieldId(null);
+        if (!canUnitEnterBattlefield(movingCard, battlefieldId)) {
+          notify('That unit cannot move to that battlefield.', 'info', { banner: true });
+          return;
+        }
         void moveUnitToLocation(unitId, battlefieldId);
         return;
       }
@@ -3287,7 +3918,16 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         void handleChampionLeaderDeploy(battlefieldId);
       }
     },
-    [draggingLeader, draggingUnitId, handleChampionLeaderDeploy, moveUnitToLocation]
+    [
+      canUnitEnterBattlefield,
+      draggingLeader,
+      draggingUnitCard,
+      draggingUnitId,
+      handleChampionLeaderDeploy,
+      moveUnitToLocation,
+      notify,
+      getBattlefieldLockReason
+    ]
   );
 
   const handleInitiativeChoice = useCallback(
@@ -3370,6 +4010,42 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     });
   };
 
+  const toggleDiscardSelection = useCallback(
+    (instanceId: string) => {
+      if (!playerDiscardPrompt) {
+        return;
+      }
+      setDiscardSelection((prev) => {
+        if (prev.includes(instanceId)) {
+          return prev.filter((value) => value !== instanceId);
+        }
+        if (discardLimit && prev.length >= discardLimit) {
+          return prev;
+        }
+        return [...prev, instanceId];
+      });
+    },
+    [discardLimit, playerDiscardPrompt]
+  );
+
+  const toggleTargetSelection = useCallback(
+    (instanceId: string) => {
+      if (!playerTargetPrompt) {
+        return;
+      }
+      setTargetSelection((prev) => {
+        if (prev.includes(instanceId)) {
+          return prev.filter((value) => value !== instanceId);
+        }
+        if (targetSelectionMax && prev.length >= targetSelectionMax) {
+          return prev;
+        }
+        return [...prev, instanceId];
+      });
+    },
+    [playerTargetPrompt, targetSelectionMax]
+  );
+
   const handleHandCardClick = (index: number) => {
     if (mulliganPrompt) {
       toggleMulliganSelection(index);
@@ -3425,7 +4101,10 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const handleBoardDragOver = useCallback(
     (event: React.DragEvent) => {
-      if (draggingHandIndex === null && !draggingLeader) {
+      if (draggingHandIndex === null && !draggingLeader && !draggingUnitId) {
+        return;
+      }
+      if (draggingUnitId && !canUnitReturnToBase(draggingUnitCard)) {
         return;
       }
       event.preventDefault();
@@ -3434,12 +4113,19 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         setBoardDragHover(true);
       }
     },
-    [boardDragHover, draggingHandIndex, draggingLeader]
+    [
+      boardDragHover,
+      canUnitReturnToBase,
+      draggingHandIndex,
+      draggingLeader,
+      draggingUnitCard,
+      draggingUnitId
+    ]
   );
 
   const handleBoardDragLeave = useCallback(
     (event: React.DragEvent) => {
-      if (draggingHandIndex === null && !draggingLeader) {
+      if (draggingHandIndex === null && !draggingLeader && !draggingUnitId) {
         return;
       }
       if (
@@ -3451,12 +4137,12 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       }
       setBoardDragHover(false);
     },
-    [draggingHandIndex, draggingLeader]
+    [draggingHandIndex, draggingLeader, draggingUnitId]
   );
 
   const handleBoardDrop = useCallback(
     (event: React.DragEvent) => {
-      if (draggingHandIndex === null && !draggingLeader) {
+      if (draggingHandIndex === null && !draggingLeader && !draggingUnitId) {
         return;
       }
       event.preventDefault();
@@ -3469,6 +4155,19 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         void handlePlayCard(index, 'base', { animateKey: animationKey ?? null });
         return;
       }
+      if (draggingUnitId) {
+        const unitId = draggingUnitId;
+        const movingCard = draggingUnitCard;
+        setDraggingUnitId(null);
+        setDragOverBattlefieldId(null);
+        setBoardDragHover(false);
+        if (!canUnitReturnToBase(movingCard)) {
+          notify('That unit cannot return to base.', 'info', { banner: true });
+          return;
+        }
+        void moveUnitToLocation(unitId, 'base');
+        return;
+      }
       if (draggingLeader) {
         setDraggingLeader(false);
         setPendingLeaderDeployment(false);
@@ -3476,7 +4175,18 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         void handleChampionLeaderDeploy('base');
       }
     },
-    [draggingCardKey, draggingHandIndex, draggingLeader, handleChampionLeaderDeploy, handlePlayCard]
+    [
+      canUnitReturnToBase,
+      draggingCardKey,
+      draggingHandIndex,
+      draggingLeader,
+      draggingUnitCard,
+      draggingUnitId,
+      handleChampionLeaderDeploy,
+      handlePlayCard,
+      moveUnitToLocation,
+      notify
+    ]
   );
 
   const submitMulliganChoice = useCallback(
@@ -3541,6 +4251,92 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     void submitMulliganChoice(mulliganSelection);
   };
 
+  const handleConfirmDiscardSelection = useCallback(() => {
+    if (!playerDiscardPrompt || !matchId || !playerId || submittingDiscardSelection) {
+      return;
+    }
+    const required = Math.min(discardLimit, playerHandCount);
+    if (discardSelection.length < required) {
+      const shortfall = required - discardSelection.length;
+      notify(
+        `Select ${shortfall} more card${shortfall === 1 ? '' : 's'} to discard.`,
+        'info',
+        { banner: true }
+      );
+      return;
+    }
+    const run = async () => {
+      try {
+        await submitDiscardSelection({
+          variables: {
+            matchId,
+            playerId,
+            promptId: playerDiscardPrompt.id,
+            cardInstanceIds: discardSelection
+          }
+        });
+        setDiscardSelection([]);
+        await refreshArenaState();
+      } catch (error) {
+        notify('Discard submission failed.', 'error', { banner: true });
+      }
+    };
+    void run();
+  }, [
+    discardLimit,
+    discardSelection,
+    matchId,
+    notify,
+    playerDiscardPrompt,
+    playerHandCount,
+    playerId,
+    refreshArenaState,
+    submitDiscardSelection,
+    submittingDiscardSelection,
+  ]);
+
+  const handleConfirmTargetSelection = useCallback(() => {
+    if (!playerTargetPrompt || !matchId || !playerId || submittingTargetSelection) {
+      return;
+    }
+    if (targetSelection.length < targetSelectionMin) {
+      const shortfall = targetSelectionMin - targetSelection.length;
+      notify(
+        `Select ${shortfall} more target${shortfall === 1 ? '' : 's'} to continue.`,
+        'info',
+        { banner: true }
+      );
+      return;
+    }
+    const run = async () => {
+      try {
+        await submitTargetSelection({
+          variables: {
+            matchId,
+            playerId,
+            promptId: playerTargetPrompt.id,
+            selectionIds: targetSelection
+          }
+        });
+        setTargetSelection([]);
+        await refreshArenaState();
+      } catch (error) {
+        notify('Target selection failed to submit.', 'error', { banner: true });
+      }
+    };
+    void run();
+  }, [
+    matchId,
+    notify,
+    playerId,
+    playerTargetPrompt,
+    refreshArenaState,
+    submitTargetSelection,
+    submittingTargetSelection,
+    targetSelection,
+    targetSelectionMin
+  ]);
+
   const handleSelectBattlefield = async (battlefieldId: string) => {
     if (!battlefieldId) {
       return;
@@ -3562,6 +4358,21 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   };
 
   const handleNextPhase = async () => {
+    if (!matchId || !playerId) {
+      notify('Match context is missing.', 'error', { banner: true });
+      return;
+    }
+    if (playerDiscardPrompt || playerTargetPrompt) {
+      notify('Resolve the active prompt before ending the phase.', 'info', { banner: true });
+      return;
+    }
+    if (isCombatPromptActive) {
+      notify('Pass priority to resolve combat before ending the phase.', 'info', { banner: true });
+      return;
+    }
+    if (!canAdvancePhase || advancingPhase) {
+      return;
+    }
     try {
       await nextPhase({
         variables: {
@@ -3875,9 +4686,11 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     );
   };
 
-  const playerGraveyard =
-    spectatorSelf?.graveyard ?? rawCurrentPlayer?.graveyard ?? [];
-  const opponentGraveyard = spectatorOpponent?.graveyard ?? [];
+  const [visibleGraveyard, setVisibleGraveyard] = useState<{
+    owner: 'self' | 'opponent';
+    cards: BaseCard[];
+  } | null>(null);
+  const hideGraveyardModal = useCallback(() => setVisibleGraveyard(null), []);
   const showIdlePrompt = !coinFlipPrompt && !battlefieldPrompt && !mulliganPrompt;
   const battlefieldStatus = useMemo<BattlefieldSelectionStatus[]>(() => {
     if (!spectatorPlayers.length) {
@@ -4305,13 +5118,6 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const resolvedOpponent = opponent as OpponentSummary;
   const opponentHandSize =
     resolvedOpponent.handSize ?? spectatorOpponent?.hand?.length ?? 0;
-  const opponentBoardState: PlayerBoardState =
-    spectatorOpponent?.board ?? {
-      creatures: [],
-      artifacts: [],
-      enchantments: [],
-    };
-  const opponentCreatures = opponentBoardState.creatures ?? [];
   const playerBaseUnits = filterBaseCards(playerCreatures);
   const opponentBaseUnits = filterBaseCards(opponentCreatures);
   const playerBaseArtifacts = filterBaseCards(currentPlayer.board?.artifacts ?? []);
@@ -4343,6 +5149,31 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     !playerMulliganPending && opponentMulliganPending
       ? `Waiting for ${opponentHeading}'s mulligan choice`
       : null;
+  const discardWaitingMessage =
+    playerDiscardPrompt || !opponentDiscardPending
+      ? null
+      : `Waiting for ${opponentHeading} to discard…`;
+  const requiredDiscardSelections = Math.min(discardLimit, playerHandCount);
+  const canConfirmDiscard =
+    Boolean(playerDiscardPrompt) && discardSelection.length === requiredDiscardSelections;
+  const showDiscardModal = Boolean(
+    (playerDiscardPrompt || discardWaitingMessage) && !showInitiativeScreen && !showBattlefieldScreen
+  );
+  const discardSourceName =
+    (playerDiscardPrompt?.data?.sourceCardName as string | undefined) ?? null;
+  const targetScopeLabel =
+    targetScope === 'graveyard'
+      ? 'Graveyard Card'
+      : targetScope === 'unit'
+        ? 'Unit'
+        : 'Target';
+  const targetWaitingMessage =
+    !playerTargetPrompt && opponentTargetPending
+      ? `Waiting for ${opponentHeading} to choose targets…`
+      : null;
+  const showTargetModal = Boolean(
+    (playerTargetPrompt || targetWaitingMessage) && !showInitiativeScreen && !showBattlefieldScreen
+  );
   const selfBoardTitle = selfHeading === 'You' ? 'Your Board' : `${selfHeading}'s Board`;
   const initiativeWinnerDisplay = initiativeOutcome
     ? resolvePlayerLabel(initiativeOutcome.winnerId, 'Unknown duelist')
@@ -4793,11 +5624,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                         </div>
                       )}
                         <div className="rune-token-strip-wrapper">
-                          <RuneTokens
-                            runes={runeTokensList}
-                            optimisticTaps={isSelf ? optimisticRuneTaps : undefined}
-                            onHover={handleCardHover}
-                          />
+                          <RuneTokens runes={runeTokensList} onHover={handleCardHover} />
                           <RuneRecycleLayer
                             events={isSelf ? playerRecycleEvents : opponentRecycleEvents}
                             onHover={handleCardHover}
@@ -4852,12 +5679,32 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                   drawAnimations={opponentDrawAnimations}
                   onAnimationComplete={handleDrawAnimationComplete}
                 />
-                <GraveyardPile cards={graveyardCards} compact />
+                <GraveyardPile
+                  cards={graveyardCards}
+                  compact
+                  ownerLabel={resolvePlayerLabel(opponentPlayerId, 'Opponent')}
+                  onClick={() =>
+                    setVisibleGraveyard({
+                      owner: 'opponent',
+                      cards: graveyardCards
+                    })
+                  }
+                />
               </div>
             )}
             {isSelf && (
               <div className="player-mat__stack">
-                <GraveyardPile cards={graveyardCards} compact />
+                <GraveyardPile
+                  cards={graveyardCards}
+                  compact
+                  ownerLabel="You"
+                  onClick={() =>
+                    setVisibleGraveyard({
+                      owner: 'self',
+                      cards: graveyardCards
+                    })
+                  }
+                />
                 <DeckStack
                   label="Deck"
                   count={deckCount}
@@ -4896,6 +5743,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const selectedUnitCanMobilize = canMobilizeUnit(selectedUnitCard);
   const selectedUnitAtBase = isCardAtBase(selectedUnitCard);
+  const selectedUnitOnBattlefield = isCardOnBattlefield(selectedUnitCard);
+  const selectedUnitHasGanking = cardHasMechanic(selectedUnitCard, 'ganking');
   const mobilizationReady = Boolean(
     selectedUnitCard &&
       selectedUnitAtBase &&
@@ -4903,7 +5752,16 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       canAct &&
       matchStatus === 'IN_PROGRESS'
   );
-  const shouldHighlightBattlefieldTargets = mobilizationReady && battlefields.length > 0;
+  const redeployReady = Boolean(
+    selectedUnitCard &&
+      selectedUnitOnBattlefield &&
+      selectedUnitHasGanking &&
+      selectedUnitCanMobilize &&
+      canAct &&
+      matchStatus === 'IN_PROGRESS'
+  );
+  const shouldHighlightBattlefieldTargets =
+    (mobilizationReady || redeployReady) && battlefields.length > 0;
 
   const battlefieldStage = (
     <div className="battlefield-stage">
@@ -4921,10 +5779,19 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
             const art =
               getCardImage(battlefieldCard) ??
               buildCardArtUrl(field.slug ?? field.card?.slug ?? null);
+            const battlefieldLockReason = getBattlefieldLockReason(field.battlefieldId);
+            const battlefieldLocked = Boolean(battlefieldLockReason);
             const selectedUnitIsHere =
               selectedUnitCard?.location?.zone === 'battlefield' &&
               selectedUnitCard.location?.battlefieldId === field.battlefieldId;
-            const highlightTarget = shouldHighlightBattlefieldTargets && !selectedUnitIsHere;
+            const selectedUnitCanDeployHere =
+              Boolean(
+                selectedUnitCard &&
+                  selectedUnitCanMobilize &&
+                  (selectedUnitAtBase || (selectedUnitHasGanking && !selectedUnitIsHere))
+              ) && !battlefieldLocked;
+            const highlightTarget =
+              shouldHighlightBattlefieldTargets && selectedUnitCanDeployHere;
             const isDragHovering = highlightTarget && dragOverBattlefieldId === field.battlefieldId;
             const battlefieldActive = combatContext?.battlefieldId === field.battlefieldId;
             const presence = field.presence ?? [];
@@ -4940,6 +5807,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
               highlightTarget ? 'battlefield-stage__card--mobilize-ready' : '',
               isDragHovering ? 'battlefield-stage__card--mobilize-hover' : '',
               battlefieldActive ? 'battlefield-stage__card--combat-active' : '',
+              battlefieldLocked ? 'battlefield-stage__card--locked' : '',
             ]
               .filter(Boolean)
               .join(' ');
@@ -4959,10 +5827,24 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                       card
                     }));
                 }) ?? [];
+            const friendlyUnits = flattenedCreatures.filter(
+              (entry) => entry.ownerSlot === 'self'
+            );
+            const battlefieldHasPendingMovement =
+              battlefieldsWithPendingMovement.has(field.battlefieldId);
+            const canFinishMovementHere =
+              battlefieldHasPendingMovement &&
+              friendlyUnits.length > 0 &&
+              canAct &&
+              matchStatus === 'IN_PROGRESS' &&
+              !battlefieldLocked &&
+              !combatContext;
+            const canShowCommenceButton = canFinishMovementHere;
             return (
               <div
                 className={battlefieldCardClass}
                 key={field.battlefieldId}
+                title={battlefieldLockReason ?? undefined}
                 onDragOver={(event) => handleBattlefieldDragOver(field.battlefieldId, event)}
                 onDragLeave={(event) => handleBattlefieldDragLeave(field.battlefieldId, event)}
                 onDrop={(event) => handleBattlefieldDrop(field.battlefieldId, event)}
@@ -4997,13 +5879,21 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                       </div>
                     </div>
                   )}
+                  {battlefieldLocked && (
+                    <div className="battlefield-stage__lock-badge">
+                      Combat resolved this turn
+                    </div>
+                  )}
                   {flattenedCreatures.length > 0 && (
                     <div className="battlefield-stage__unit-layer">
                       <div className="battlefield-stage__unit-lane battlefield-stage__unit-lane--opponent">
                         {flattenedCreatures
                           .filter((entry) => entry.ownerSlot === 'opponent')
                           .map((entry) => (
-                            <div key={entry.card.instanceId} className="battlefield-stage__unit">
+                            <div
+                              key={`${field.battlefieldId}-${cardIdValue(entry.card)}-opponent`}
+                              className="battlefield-stage__unit"
+                            >
                               <CardTile card={entry.card} compact onHover={handleCardHover} />
                             </div>
                           ))}
@@ -5011,11 +5901,48 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                       <div className="battlefield-stage__unit-lane battlefield-stage__unit-lane--self">
                         {flattenedCreatures
                           .filter((entry) => entry.ownerSlot === 'self')
-                          .map((entry) => (
-                            <div key={entry.card.instanceId} className="battlefield-stage__unit battlefield-stage__unit--self">
-                              <CardTile card={entry.card} compact onHover={handleCardHover} />
-                            </div>
-                          ))}
+                          .map((entry) => {
+                            const cardKey = cardIdValue(entry.card);
+                            const instanceId = entry.card.instanceId;
+                            const displayCard =
+                              instanceId && optimisticUnitTaps.has(instanceId)
+                                ? { ...entry.card, isTapped: true, tapped: true }
+                                : entry.card;
+                            const isSelected = Boolean(
+                              instanceId && selectedUnit === instanceId
+                            );
+                            const canDragUnit = Boolean(
+                              canAct && instanceId && canMobilizeUnit(entry.card)
+                            );
+                            return (
+                              <div
+                                key={`${field.battlefieldId}-${cardKey}-self`}
+                                className="battlefield-stage__unit battlefield-stage__unit--self"
+                              >
+                                <CardTile
+                                  card={displayCard}
+                                  compact
+                                  selectable={canAct}
+                                  isSelected={isSelected}
+                                  onClick={
+                                    canAct ? () => handleSelectUnit(entry.card) : undefined
+                                  }
+                                  draggable={canDragUnit}
+                                  onDragStart={
+                                    canDragUnit
+                                      ? (event) => handleUnitDragStart(entry.card, event)
+                                      : undefined
+                                  }
+                                  onDragEnd={
+                                    canDragUnit
+                                      ? (event) => handleUnitDragEnd(entry.card, event)
+                                      : undefined
+                                  }
+                                  onHover={handleCardHover}
+                                />
+                              </div>
+                            );
+                          })}
                       </div>
                     </div>
                   )}
@@ -5027,13 +5954,33 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                     disabled={
                       !canAct ||
                       movingUnit ||
-                      !selectedUnitCard ||
-                      !selectedUnitCanMobilize ||
-                      selectedUnitIsHere
+                      !selectedUnitCanDeployHere
                     }
                   >
-                    {movingUnit ? 'Deploying…' : `Deploy to ${field.name ?? 'battlefield'}`}
+                    {movingUnit
+                      ? 'Moving…'
+                      : selectedUnitAtBase
+                        ? `Deploy to ${field.name ?? 'battlefield'}`
+                        : `Redeploy to ${field.name ?? 'battlefield'}`}
                   </button>
+                )}
+                {canShowCommenceButton && (
+                  <button
+                    className="prompt-button primary battlefield-stage__commence-button"
+                    onClick={() => commenceBattle(field.battlefieldId)}
+                    disabled={
+                      commencingBattle ||
+                      commencingBattlefieldId === field.battlefieldId ||
+                      friendlyUnits.length === 0
+                    }
+                  >
+                    {commencingBattlefieldId === field.battlefieldId
+                      ? 'Finishing…'
+                      : 'Finish Moving Units'}
+                  </button>
+                )}
+                {battlefieldLockReason && (
+                  <p className="muted small">{battlefieldLockReason}</p>
                 )}
               </div>
             );
@@ -5047,6 +5994,38 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     opponentHandSize > 0 ? (
       <div className="opponent-hand-strip">
         <HiddenHand count={opponentHandSize} />
+      </div>
+    ) : null;
+
+  const combatPriorityBanner =
+    isCombatPromptActive && combatContext ? (
+      <div className="combat-priority-banner" role="status">
+        <div className="combat-priority-banner__info">
+          <span>Battlefield Engagement</span>
+          <strong>{combatBattlefield?.name ?? 'Contested battlefield'}</strong>
+          <div className="combat-priority-banner__details">
+            <span>Stage: {combatStage === 'reaction' ? 'Reaction' : 'Action'}</span>
+            <span>
+              {hasCombatPriority ? 'You have priority' : `${combatPriorityHolderName} has priority`}
+            </span>
+          </div>
+        </div>
+        <div className="combat-priority-banner__actions">
+          {hasCombatPriority ? (
+            <button
+              type="button"
+              className="prompt-button secondary"
+              onClick={handlePassPriority}
+              disabled={passingPriority}
+            >
+              {passingPriority ? 'Passing…' : 'Pass Priority'}
+            </button>
+          ) : (
+            <span className="combat-priority-banner__waiting">
+              Waiting for {combatPriorityHolderName}
+            </span>
+          )}
+        </div>
       </div>
     ) : null;
 
@@ -5098,43 +6077,25 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     </div>
   ) : null;
   const matchStatusRow = <div className="match-status-row">{matchInfoPanel}</div>;
-  const matchStatusClusterSticky = (
+  const matchStatusCluster = (
     <div className="match-status-cluster">
       <div className="match-status-row-wrapper">{matchStatusRow}</div>
-      {opponentHandBanner}
     </div>
   );
-  const combatPriorityBanner =
-    isCombatPromptActive && combatContext ? (
-      <div className="combat-priority-banner" role="status">
-        <div className="combat-priority-banner__info">
-          <span>Battlefield Engagement</span>
-          <strong>{combatBattlefield?.name ?? 'Contested battlefield'}</strong>
-          <div className="combat-priority-banner__details">
-            <span>Stage: {combatStage === 'reaction' ? 'Reaction' : 'Action'}</span>
-            <span>
-              {hasCombatPriority ? 'You have priority' : `${combatPriorityHolderName} has priority`}
-            </span>
-          </div>
-        </div>
-        <div className="combat-priority-banner__actions">
-          {hasCombatPriority ? (
-            <button
-              type="button"
-              className="prompt-button secondary"
-              onClick={handlePassPriority}
-              disabled={passingPriority}
-            >
-              {passingPriority ? 'Passing…' : 'Pass Priority'}
-            </button>
-          ) : (
-            <span className="combat-priority-banner__waiting">
-              Waiting for {combatPriorityHolderName}
-            </span>
-          )}
-        </div>
+  const combatPrioritySticky = combatPriorityBanner ? (
+    <div className="combat-priority-sticky">{combatPriorityBanner}</div>
+  ) : null;
+  const matchStatusHeader = (
+    <div className="match-status-frame">
+      <div className="match-status-sticky">
+        {matchStatusCluster}
+        {combatPrioritySticky}
       </div>
-    ) : null;
+      {opponentHandBanner ? (
+        <div className="match-status-hand">{opponentHandBanner}</div>
+      ) : null}
+    </div>
+  );
 
   const renderChampionPanel = (
     title: string,
@@ -5442,6 +6403,59 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     </aside>
   );
 
+  const graveyardModal = visibleGraveyard ? (
+    <div
+      className="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label={
+        visibleGraveyard.owner === 'self'
+          ? 'Your graveyard'
+          : `${resolvePlayerLabel(opponentPlayerId, 'Opponent')}'s graveyard`
+      }
+      onClick={hideGraveyardModal}
+    >
+      <div
+        className="graveyard-modal"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="graveyard-modal__header">
+          <h4>
+            {visibleGraveyard.owner === 'self'
+              ? 'Your Graveyard'
+              : `${resolvePlayerLabel(opponentPlayerId, 'Opponent')}'s Graveyard`}
+          </h4>
+          <button
+            type="button"
+            className="graveyard-modal__close"
+            aria-label="Close graveyard view"
+            onClick={hideGraveyardModal}
+          >
+            ×
+          </button>
+        </div>
+        <div className="graveyard-modal__content">
+          {visibleGraveyard.cards.length > 0 ? (
+            visibleGraveyard.cards.map((card, index) => {
+              const key = cardIdValue(card) ?? `${visibleGraveyard.owner}-${index}`;
+              return (
+                <CardTile
+                  key={key}
+                  card={card}
+                  compact
+                  widthPx={150}
+                  onHover={handleCardHover}
+                />
+              );
+            })
+          ) : (
+            <div className="graveyard-stack__empty">No cards in this graveyard.</div>
+          )}
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   const boardView = (
     <>
       <div className="arena-layout">
@@ -5450,8 +6464,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           {championDock}
         </div>
         <div className="arena-layout__main">
-          {matchStatusClusterSticky}
-          {combatPriorityBanner}
+          {matchStatusHeader}
           <div className="duel-stage">
             {renderPlayerZone('opponent')}
             <div className="arena-divider">
@@ -5492,12 +6505,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     </section>
   )}
       {deploymentOverlay}
-      {actionMessage && (
-        <AnnouncementModal
-          message={actionMessage}
-          onClose={() => setActionMessage(null)}
-        />
-      )}
+      {graveyardModal}
     </>
   );
 
@@ -5535,6 +6543,34 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           onToggle={toggleMulliganSelection}
           onConfirm={handleConfirmMulligan}
           onSkip={handleKeepHand}
+        />
+      )}
+      {showDiscardModal && (
+        <DiscardModal
+          cards={currentPlayer.hand}
+          selection={discardSelection}
+          limit={discardLimit}
+          loading={submittingDiscardSelection}
+          waitingMessage={discardWaitingMessage}
+          sourceName={discardSourceName}
+          canConfirm={canConfirmDiscard}
+          onToggle={toggleDiscardSelection}
+          onConfirm={handleConfirmDiscardSelection}
+        />
+      )}
+      {showTargetModal && (
+        <TargetSelectionModal
+          cards={targetCandidates}
+          selection={targetSelection}
+          min={targetSelectionMin}
+          max={targetMaxForDisplay || targetSelectionMin || 1}
+          loading={submittingTargetSelection}
+          waitingMessage={targetWaitingMessage}
+          sourceName={targetSourceName}
+          scopeLabel={targetScopeLabel}
+          canConfirm={canConfirmTarget}
+          onToggle={toggleTargetSelection}
+          onConfirm={handleConfirmTargetSelection}
         />
       )}
       {showConcedeConfirm && (

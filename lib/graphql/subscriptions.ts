@@ -73,6 +73,9 @@ export const GAME_STATE_CHANGED = gql`
       combatContext {
         battlefieldId
         initiatedBy
+        defendingPlayerId
+        attackingUnitIds
+        defendingUnitIds
         priorityStage
       }
     }
@@ -108,6 +111,9 @@ export const PLAYER_GAME_STATE_CHANGED = gql`
         combatContext {
           battlefieldId
           initiatedBy
+          defendingPlayerId
+          attackingUnitIds
+          defendingUnitIds
           priorityStage
         }
       }

@@ -19,6 +19,7 @@ export const CARD_STATE_FIELDS = gql`
     isTapped
     summoned
     counters
+    metadata
     assets {
       remote
       localPath
@@ -189,6 +190,8 @@ export const BATTLEFIELD_STATE_FIELDS = gql`
     lastHoldTurn
     lastCombatTurn
     lastHoldScoreTurn
+    combatTurnByPlayer
+    effectState
     presence {
       playerId
       totalMight

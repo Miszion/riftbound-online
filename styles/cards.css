@@ -6,13 +6,13 @@
   height: 220px;
   border-radius: 12px;
   overflow: hidden;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
   background: linear-gradient(
     135deg,
-    rgba(255, 255, 255, 0.05),
-    rgba(255, 255, 255, 0.01)
+    rgba(var(--color-surface-contrast-rgb), 0.08),
+    rgba(var(--color-surface-contrast-rgb), 0.02)
   );
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(var(--color-border-rgb), 0.25);
   transition: transform 0.3s ease, box-shadow 0.3s ease;
 }
 
@@ -27,8 +27,8 @@
   overflow: hidden;
   background: linear-gradient(
     180deg,
-    rgba(109, 211, 255, 0.1),
-    rgba(155, 124, 255, 0.05)
+    rgba(var(--color-accent-rgb), 0.15),
+    rgba(var(--color-accent-rgb-2), 0.05)
   );
 }
 
@@ -43,10 +43,10 @@
   height: 60px;
   background: linear-gradient(
     180deg,
-    rgba(15, 23, 36, 0.8),
-    rgba(7, 16, 33, 0.95)
+    rgba(var(--color-panel-rgb), 0.85),
+    rgba(var(--color-panel-rgb), 0.95)
   );
-  border-top: 1px solid rgba(109, 211, 255, 0.1);
+  border-top: 1px solid rgba(var(--color-border-rgb), 0.25);
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -56,7 +56,7 @@
   margin: 0;
   font-size: 0.85rem;
   line-height: 1.2;
-  color: #e6eef6;
+  color: var(--color-text-primary);
 }
 
 .card-stats {
@@ -73,15 +73,15 @@
   width: 20px;
   height: 20px;
   border-radius: 3px;
-  color: #fff;
+  color: var(--color-on-dark);
 }
 
 .stat.power {
-  background: linear-gradient(135deg, #ff6b6b, #ff5252);
+  background: linear-gradient(135deg, var(--color-danger), var(--color-danger-strong));
 }
 
 .stat.health {
-  background: linear-gradient(135deg, #51cf66, #37b24d);
+  background: linear-gradient(135deg, #51cf66, var(--color-success));
 }
 
 /* Card type variations */
@@ -94,7 +94,7 @@
   position: absolute;
   top: 8px;
   right: 8px;
-  color: #ffd700;
+  color: var(--color-warning);
   font-size: 1rem;
   z-index: 2;
 }
@@ -108,7 +108,7 @@
   position: absolute;
   top: 8px;
   right: 8px;
-  color: #9b7cff;
+  color: var(--accent-2);
   font-size: 0.9rem;
   z-index: 2;
 }
@@ -122,7 +122,7 @@
   position: absolute;
   top: 8px;
   right: 8px;
-  color: #6dd3ff;
+  color: var(--accent);
   font-size: 0.8rem;
   z-index: 2;
 }
