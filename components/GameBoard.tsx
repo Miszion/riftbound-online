@@ -35,6 +35,7 @@ import {
   useSubmitTargetSelection,
 } from '@/hooks/useGraphQL';
 import type { ToastTone } from '@/components/ui/ToastStack';
+import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import useToasts from '@/hooks/useToasts';
 import doransBladeImg from '@/public/images/dorans-blade.jpg';
 import doransShieldImg from '@/public/images/dorans-shield.jpg';
@@ -102,6 +103,7 @@ type PlayerBoardState = {
 
 type ChampionAbilityStateData = {
   canActivate: boolean;
+  hasManualActivation?: boolean | null;
   reason?: string | null;
   costSummary?: string | null;
   cost?: {
@@ -801,6 +803,36 @@ const friendlyStatus = (status?: string) => {
     .split('_')
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ');
+};
+
+/**
+ * Check battlefield deployment permissions for a card based on its text.
+ * Returns flags for which battlefield types the card can be played to.
+ */
+const getCardBattlefieldDeploymentPermissions = (card: BaseCard) => {
+  const textFragments: string[] = [];
+  if (card.text) {
+    textFragments.push(card.text);
+  }
+  if (card.effect) {
+    textFragments.push(card.effect);
+  }
+  const normalizedText = textFragments.join(' ').toLowerCase();
+
+  // "You may play me to an open battlefield"
+  const canPlayToOpenBattlefield = /you may play me to an open battlefield/i.test(normalizedText);
+
+  // "You may play me to an occupied enemy battlefield"
+  const canPlayToOccupiedEnemyBattlefield = /you may play me to an occupied enemy battlefield/i.test(normalizedText);
+
+  // "Friendly units may be played to open battlefields" (for cards that grant this to allies)
+  const grantsOpenBattlefieldPlayToAllies = /friendly units may be played to open battlefields/i.test(normalizedText);
+
+  return {
+    canPlayToOpenBattlefield,
+    canPlayToOccupiedEnemyBattlefield,
+    grantsOpenBattlefieldPlayToAllies,
+  };
 };
 
 const getCardImage = (
@@ -2113,7 +2145,7 @@ const MatchResultOverlay = ({
       </p>
       <p className="match-result-overlay__reason">Reason: {reasonLabel}</p>
       <button type="button" className="prompt-button primary" onClick={onReturn}>
-        Return to Queue
+        Return to Matchmaking
       </button>
     </div>
   </div>
@@ -2217,6 +2249,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const [mulliganCompleteNotified, setMulliganCompleteNotified] = useState(false);
   const [showConcedeConfirm, setShowConcedeConfirm] = useState(false);
   const [concedingMatch, setConcedingMatch] = useState(false);
+  const [awaitingConcessionResult, setAwaitingConcessionResult] = useState(false);
   const [draggingUnitId, setDraggingUnitId] = useState<string | null>(null);
   const [dragOverBattlefieldId, setDragOverBattlefieldId] = useState<string | null>(null);
   const { pushToast } = useToasts();
@@ -2247,9 +2280,17 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const handAnimationTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const duelLogCounter = useRef(0);
   const autoMulliganRef = useRef(false);
+  const initialMountRef = useRef(true);
   const selfZoneRef = useRef<HTMLElement | null>(null);
   const opponentZoneRef = useRef<HTMLElement | null>(null);
   const playerHandRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    // Mark initial mount as complete after a short delay to avoid stale toasts on refresh
+    const timeout = setTimeout(() => {
+      initialMountRef.current = false;
+    }, 1500);
+    return () => clearTimeout(timeout);
+  }, []);
   useEffect(() => {
     return () => {
       Object.values(handAnimationTimeouts.current).forEach((timeout) => clearTimeout(timeout));
@@ -3243,7 +3284,10 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       (prompt) => prompt.type === 'mulligan' && !prompt.resolved
     );
     if (sawMulliganPhase && !mulliganStillPending && !mulliganCompleteNotified) {
-      notify('Mulligan phase completed', 'success', { banner: true });
+      // Skip toast on initial mount/refresh to avoid showing stale notifications
+      if (!initialMountRef.current) {
+        notify('Mulligan phase completed', 'success', { banner: true });
+      }
       setMulliganCompleteNotified(true);
     } else if (mulliganStillPending && mulliganCompleteNotified) {
       setMulliganCompleteNotified(false);
@@ -3333,6 +3377,26 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     () => battlefields.filter((field) => field.controller === playerId),
     [battlefields, playerId]
   );
+  
+  const openBattlefields = useMemo(
+    () => battlefields.filter((field) => !field.controller),
+    [battlefields]
+  );
+  
+  const occupiedEnemyBattlefields = useMemo(
+    () => battlefields.filter((field) => field.controller && field.controller !== playerId),
+    [battlefields, playerId]
+  );
+  
+  // Check if any ally on board grants "friendly units may be played to open battlefields"
+  const hasAllyGrantingOpenBattlefieldDeploy = useMemo(() => {
+    const creatures = currentPlayer.board?.creatures ?? [];
+    return creatures.some((creature) => {
+      const perms = getCardBattlefieldDeploymentPermissions(creature);
+      return perms.grantsOpenBattlefieldPlayToAllies;
+    });
+  }, [currentPlayer.board?.creatures]);
+  
   const combatBattlefield = combatContext
     ? battlefields.find((field) => field.battlefieldId === combatContext.battlefieldId) ?? null
     : null;
@@ -3554,7 +3618,10 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       setInitiativeRevealActive(false);
       return;
     }
-    if (rawStatus === 'coin_flip') {
+    // Skip initiative reveal if game is past coin_flip phase (e.g., on page refresh)
+    const statusRank = resolveStatusRank(rawStatus);
+    const coinFlipRank = resolveStatusRank('coin_flip');
+    if (rawStatus === 'coin_flip' || statusRank > coinFlipRank) {
       return;
     }
     setInitiativeRevealActive(true);
@@ -3857,8 +3924,55 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     [moveUnitToLocation, selectedUnit]
   );
 
+  /**
+   * Check if a hand card can be dropped on a specific battlefield
+   */
+  const canPlayHandCardToBattlefield = useCallback(
+    (card: BaseCard | null, battlefieldId: string): boolean => {
+      if (!card) return false;
+      const cardType = (card.type ?? '').toUpperCase();
+      if (cardType !== 'CREATURE') return false;
+      
+      const battlefield = battlefields.find((f) => f.battlefieldId === battlefieldId);
+      if (!battlefield) return false;
+      
+      // Can always deploy to controlled battlefield
+      if (battlefield.controller === playerId) {
+        return true;
+      }
+      
+      const cardPerms = getCardBattlefieldDeploymentPermissions(card);
+      const isOpen = !battlefield.controller;
+      const isEnemyOccupied = battlefield.controller && battlefield.controller !== playerId;
+      
+      // Can deploy to open if card allows or ally grants it
+      if (isOpen && (cardPerms.canPlayToOpenBattlefield || hasAllyGrantingOpenBattlefieldDeploy)) {
+        return true;
+      }
+      
+      // Can deploy to enemy occupied if card allows
+      if (isEnemyOccupied && cardPerms.canPlayToOccupiedEnemyBattlefield) {
+        return true;
+      }
+      
+      return false;
+    },
+    [battlefields, hasAllyGrantingOpenBattlefieldDeploy, playerId]
+  );
+
   const handleBattlefieldDragOver = useCallback(
     (battlefieldId: string, event: React.DragEvent<HTMLDivElement>) => {
+      // Handle hand card being dragged
+      if (draggingHandIndex !== null) {
+        const card = currentPlayer.hand[draggingHandIndex] ?? null;
+        if (canPlayHandCardToBattlefield(card, battlefieldId)) {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'move';
+          setDragOverBattlefieldId((previous) => (previous === battlefieldId ? previous : battlefieldId));
+        }
+        return;
+      }
+      
       if (!draggingUnitId && !draggingLeader) {
         return;
       }
@@ -3869,12 +3983,12 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       event.dataTransfer.dropEffect = 'move';
       setDragOverBattlefieldId((previous) => (previous === battlefieldId ? previous : battlefieldId));
     },
-    [canUnitEnterBattlefield, draggingLeader, draggingUnitCard, draggingUnitId]
+    [canPlayHandCardToBattlefield, canUnitEnterBattlefield, currentPlayer.hand, draggingHandIndex, draggingLeader, draggingUnitCard, draggingUnitId]
   );
 
   const handleBattlefieldDragLeave = useCallback(
     (battlefieldId: string, event: React.DragEvent<HTMLDivElement>) => {
-      if (!draggingUnitId && !draggingLeader) {
+      if (draggingHandIndex === null && !draggingUnitId && !draggingLeader) {
         return;
       }
       const nextTarget = event.relatedTarget as Node | null;
@@ -3883,11 +3997,29 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       }
       setDragOverBattlefieldId((previous) => (previous === battlefieldId ? null : previous));
     },
-    [draggingLeader, draggingUnitId]
+    [draggingHandIndex, draggingLeader, draggingUnitId]
   );
 
   const handleBattlefieldDrop = useCallback(
     (battlefieldId: string, event: React.DragEvent<HTMLDivElement>) => {
+      // Handle hand card being dropped
+      if (draggingHandIndex !== null) {
+        const card = currentPlayer.hand[draggingHandIndex] ?? null;
+        if (!canPlayHandCardToBattlefield(card, battlefieldId)) {
+          setDragOverBattlefieldId(null);
+          return;
+        }
+        event.preventDefault();
+        const index = draggingHandIndex;
+        const animationKey = draggingCardKey;
+        setDraggingHandIndex(null);
+        setDraggingCardKey(null);
+        setDragOverBattlefieldId(null);
+        setBoardDragHover(false);
+        void handlePlayCard(index, battlefieldId, { animateKey: animationKey ?? null });
+        return;
+      }
+      
       if (!draggingUnitId && !draggingLeader) {
         setDragOverBattlefieldId(null);
         return;
@@ -3919,11 +4051,16 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       }
     },
     [
+      canPlayHandCardToBattlefield,
       canUnitEnterBattlefield,
+      currentPlayer.hand,
+      draggingCardKey,
+      draggingHandIndex,
       draggingLeader,
       draggingUnitCard,
       draggingUnitId,
       handleChampionLeaderDeploy,
+      handlePlayCard,
       moveUnitToLocation,
       notify,
       getBattlefieldLockReason
@@ -4065,9 +4202,22 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       return;
     }
     const cardType = (card.type ?? '').toUpperCase();
-    if (cardType === 'CREATURE' && controlledBattlefields.length > 0) {
-      setPendingDeployment(index);
-      return;
+    if (cardType === 'CREATURE') {
+      // Check deployment permissions for this card
+      const cardPerms = getCardBattlefieldDeploymentPermissions(card);
+      const canDeployToOpen = cardPerms.canPlayToOpenBattlefield || hasAllyGrantingOpenBattlefieldDeploy;
+      const canDeployToOccupiedEnemy = cardPerms.canPlayToOccupiedEnemyBattlefield;
+      
+      // Show deployment modal if there are any battlefield deployment options
+      const hasDeployOptions = 
+        controlledBattlefields.length > 0 ||
+        (canDeployToOpen && openBattlefields.length > 0) ||
+        (canDeployToOccupiedEnemy && occupiedEnemyBattlefields.length > 0);
+      
+      if (hasDeployOptions) {
+        setPendingDeployment(index);
+        return;
+      }
     }
     void handlePlayCard(index, null, { animateKey: cardKey });
   };
@@ -4472,9 +4622,24 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         },
       });
       setShowConcedeConfirm(false);
-    } catch (error) {
+      // Keep loading state until match result is determined
+      setAwaitingConcessionResult(true);
+    } catch (error: unknown) {
       console.error('Failed to concede', error);
-      notify('Unable to concede right now.', 'error', { banner: true });
+      // If the error indicates the match is unavailable/already ended, handle gracefully
+      const errorMessage = error instanceof Error ? error.message : '';
+      const isMatchEnded = 
+        errorMessage.toLowerCase().includes('not available') ||
+        errorMessage.toLowerCase().includes('unavailable') ||
+        errorMessage.toLowerCase().includes('not found');
+      
+      if (isMatchEnded) {
+        // Match already ended - just close the modal and let the UI update naturally
+        setShowConcedeConfirm(false);
+        notify('The match has already ended.', 'info', { banner: true });
+      } else {
+        notify('Failed to concede. Please try again.', 'error', { banner: true });
+      }
     } finally {
       setConcedingMatch(false);
     }
@@ -4488,7 +4653,9 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   }, [concedingMatch]);
 
   const handleReturnToQueue = useCallback(() => {
-    router.push('/matchmaking');
+    // Pass a parameter to signal that we're returning from a completed match
+    // This tells the matchmaking page to skip any stale match state
+    router.push('/matchmaking?fromMatch=true');
   }, [router]);
 
   const handleChatSubmit = useCallback(
@@ -4516,6 +4683,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
             playerId,
             message: trimmed,
           },
+          context: { skipNetworkActivity: true },
         });
         setChatMessages((prev) => prev.filter((entry) => entry.id !== optimisticId));
         const serverLog = response.data?.sendChatMessage?.gameState?.chatLog ?? null;
@@ -4853,14 +5021,20 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           }`;
     return `Waiting for ${formatted} to lock their battlefields.`;
   })();
-  const waitingForBattlefieldData = bothBattlefieldsLocked && battlefields.length === 0;
+  // Check if the game has already progressed past battlefield selection phase
+  // This handles refreshes where the battlefields array may be empty initially
+  const gameStatusRank = resolveStatusRank(rawStatus);
+  const battlefieldSelectionRank = resolveStatusRank('battlefield_selection');
+  const isPastBattlefieldPhase = gameStatusRank > battlefieldSelectionRank;
+  const waitingForBattlefieldData = bothBattlefieldsLocked && battlefields.length === 0 && !isPastBattlefieldPhase;
   useEffect(() => {
-    if (!bothBattlefieldsLocked || battlefieldAdvanceTriggered) {
+    // Skip battlefield advance sequence if game is already past that phase (e.g., on page refresh)
+    if (!bothBattlefieldsLocked || battlefieldAdvanceTriggered || isPastBattlefieldPhase) {
       return;
     }
     setBattlefieldAdvanceTriggered(true);
     setBattlefieldCountdown(BATTLEFIELD_REVEAL_COUNTDOWN_SECONDS);
-  }, [bothBattlefieldsLocked, battlefieldAdvanceTriggered]);
+  }, [bothBattlefieldsLocked, battlefieldAdvanceTriggered, isPastBattlefieldPhase]);
   useEffect(() => {
     if (battlefieldCountdown === null || battlefieldCountdown <= 0) {
       return;
@@ -5046,7 +5220,10 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     if (opponentVictoryPoints > opponentVictoryPrev.current) {
       setOpponentVictoryFlash(true);
-      notify(`${opponentHeading} gained a victory point.`, 'warning');
+      // Skip toast on initial mount/refresh to avoid showing stale notifications
+      if (!initialMountRef.current) {
+        notify(`${opponentHeading} gained a victory point.`, 'warning');
+      }
       timeout = setTimeout(() => setOpponentVictoryFlash(false), 2200);
     }
     opponentVictoryPrev.current = opponentVictoryPoints;
@@ -5060,7 +5237,10 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     if (playerVictoryPoints > playerVictoryPrev.current) {
       setPlayerVictoryFlash(true);
-      notify('You gained a victory point!', 'success', { banner: true });
+      // Skip toast on initial mount/refresh to avoid showing stale notifications
+      if (!initialMountRef.current) {
+        notify('You gained a victory point!', 'success', { banner: true });
+      }
       timeout = setTimeout(() => setPlayerVictoryFlash(false), 2200);
     }
     playerVictoryPrev.current = playerVictoryPoints;
@@ -5074,11 +5254,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   if (matchInitializing && !hasMatchInitTimedOut) {
     return (
       <div className="game-board">
-        <div className="status-bar">
-          <span>
-            Match found! Waiting for the server to finish initializing the
-            arena…
-          </span>
+        <div className="loading-overlay" aria-live="polite">
+          <LoadingSpinner size="lg" />
         </div>
       </div>
     );
@@ -5109,8 +5286,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   if (isLoading || !playerView || !spectatorState || !hasCurrentPlayer || !opponent) {
     return (
       <div className="game-board">
-        <div className="status-bar">
-          <span>Loading arena...</span>
+        <div className="loading-overlay" aria-live="polite">
+          <LoadingSpinner size="lg" />
         </div>
       </div>
     );
@@ -5138,6 +5315,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const matchWinnerId = spectatorState?.winner ?? null;
   const matchEnded = rawStatus === 'winner_determined';
   const playerWonMatch = matchEnded && matchWinnerId === playerId;
+
   const opponentNameForResult = playerWonMatch
     ? opponentHeading
     : resolvePlayerLabel(matchWinnerId, opponentHeading);
@@ -5790,9 +5968,15 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                   selectedUnitCanMobilize &&
                   (selectedUnitAtBase || (selectedUnitHasGanking && !selectedUnitIsHere))
               ) && !battlefieldLocked;
+            
+            // Check if a hand card is being dragged that can be played here
+            const draggingHandCard = draggingHandIndex !== null ? currentPlayer.hand[draggingHandIndex] ?? null : null;
+            const canPlayDraggedCardHere = draggingHandCard && canPlayHandCardToBattlefield(draggingHandCard, field.battlefieldId);
+            
             const highlightTarget =
-              shouldHighlightBattlefieldTargets && selectedUnitCanDeployHere;
-            const isDragHovering = highlightTarget && dragOverBattlefieldId === field.battlefieldId;
+              (shouldHighlightBattlefieldTargets && selectedUnitCanDeployHere) || canPlayDraggedCardHere;
+            const isDragHovering = (highlightTarget && dragOverBattlefieldId === field.battlefieldId) || 
+              (canPlayDraggedCardHere && dragOverBattlefieldId === field.battlefieldId);
             const battlefieldActive = combatContext?.battlefieldId === field.battlefieldId;
             const presence = field.presence ?? [];
             const selfPresence =
@@ -6108,12 +6292,16 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     isSelfPanel = false,
     highlightVictory = false
   ) => {
-    const legendReady = Boolean(isSelfPanel && legendState?.canActivate && legend);
+    // Legend is only clickable if it has a manual activation AND is ready to activate
+    const legendHasManualActivation = legendState?.hasManualActivation !== false;
+    const legendReady = Boolean(isSelfPanel && legendState?.canActivate && legend && legendHasManualActivation);
     const leaderReady = Boolean(isSelfPanel && leaderState?.canActivate && leader);
     const legendStatusText = legendState
-      ? legendState.canActivate
-        ? `Ready${legendState.costSummary ? ` — ${legendState.costSummary}` : ''}`
-        : legendState.reason ?? 'Unavailable'
+      ? !legendHasManualActivation
+        ? 'Passive ability'
+        : legendState.canActivate
+          ? `Ready${legendState.costSummary ? ` — ${legendState.costSummary}` : ''}`
+          : legendState.reason ?? 'Unavailable'
       : null;
     const leaderStatusText = leaderState
       ? leaderState.canActivate
@@ -6154,7 +6342,9 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
             {isSelfPanel && legendStatusText ? (
               <div
                 className={`champion-ability-status${
-                  legendState?.canActivate ? ' champion-ability-status--ready' : ' champion-ability-status--blocked'
+                  legendReady ? ' champion-ability-status--ready' : 
+                  !legendHasManualActivation ? ' champion-ability-status--passive' : 
+                  ' champion-ability-status--blocked'
                 }`}
               >
                 {legendStatusText}
@@ -6273,36 +6463,64 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     card: BaseCard,
     onDeploy: (destinationId: string | null) => void,
     onCancel: () => void
-  ) => (
-    <div className="deploy-overlay">
-      <div className="deploy-modal">
-        <h4>Deploy {card.name ?? 'Unit'}</h4>
-        <p>Select where you would like to deploy this unit.</p>
-        <div className="deploy-options">
-          <button
-            type="button"
-            className="prompt-button secondary"
-            onClick={() => onDeploy(null)}
-          >
-            Base
-          </button>
-          {controlledBattlefields.map((field) => (
+  ) => {
+    const cardPerms = getCardBattlefieldDeploymentPermissions(card);
+    const canDeployToOpen = cardPerms.canPlayToOpenBattlefield || hasAllyGrantingOpenBattlefieldDeploy;
+    const canDeployToOccupiedEnemy = cardPerms.canPlayToOccupiedEnemyBattlefield;
+    
+    return (
+      <div className="deploy-overlay">
+        <div className="deploy-modal">
+          <h4>Deploy {card.name ?? 'Unit'}</h4>
+          <p>Select where you would like to deploy this unit.</p>
+          <div className="deploy-options">
             <button
               type="button"
-              key={field.battlefieldId}
-              className="prompt-button primary"
-              onClick={() => onDeploy(field.battlefieldId)}
+              className="prompt-button secondary"
+              onClick={() => onDeploy(null)}
             >
-              {field.name}
+              Base
             </button>
-          ))}
+            {controlledBattlefields.map((field) => (
+              <button
+                type="button"
+                key={field.battlefieldId}
+                className="prompt-button primary"
+                onClick={() => onDeploy(field.battlefieldId)}
+              >
+                {field.name} (Controlled)
+              </button>
+            ))}
+            {canDeployToOpen && openBattlefields.map((field) => (
+              <button
+                type="button"
+                key={field.battlefieldId}
+                className="prompt-button"
+                style={{ backgroundColor: '#4ade80', color: 'black' }}
+                onClick={() => onDeploy(field.battlefieldId)}
+              >
+                {field.name} (Open)
+              </button>
+            ))}
+            {canDeployToOccupiedEnemy && occupiedEnemyBattlefields.map((field) => (
+              <button
+                type="button"
+                key={field.battlefieldId}
+                className="prompt-button"
+                style={{ backgroundColor: '#f87171', color: 'white' }}
+                onClick={() => onDeploy(field.battlefieldId)}
+              >
+                {field.name} (Enemy)
+              </button>
+            ))}
+          </div>
+          <button type="button" className="prompt-button danger" onClick={onCancel}>
+            Cancel
+          </button>
         </div>
-        <button type="button" className="prompt-button danger" onClick={onCancel}>
-          Cancel
-        </button>
       </div>
-    </div>
-  );
+    );
+  };
 
   const deploymentOverlay =
     pendingDeploymentCard && pendingDeployment != null
@@ -6579,6 +6797,11 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           onConfirm={confirmConcede}
           onCancel={cancelConcedePrompt}
         />
+      )}
+      {awaitingConcessionResult && !matchEnded && (
+        <div className="loading-overlay" aria-live="polite">
+          <LoadingSpinner size="lg" />
+        </div>
       )}
       {matchResultOverlay}
     </div>

@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import Header from '@/components/Header'
 import Footer from '@/components/Footer'
 import RequireAuth from '@/components/auth/RequireAuth'
@@ -152,6 +152,8 @@ export default function MatchmakingPage() {
 function MatchmakingContent() {
   const { user } = useAuth()
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const fromMatch = searchParams.get('fromMatch') === 'true'
   const userId = user?.userId ?? ''
   const [selectedDeckId, setSelectedDeckId] = useState('')
   const [mode, setMode] = useState<MatchMode>('free')
@@ -163,6 +165,8 @@ function MatchmakingContent() {
     string,
     'pending' | 'success' | 'error'
   >>({})
+  // Track if we've already handled the fromMatch cleanup to avoid repeating
+  const fromMatchHandled = useRef(false)
   const { pushToast } = useToasts()
   const lastAnnouncedMatchId = useRef<string | null>(null)
   const redirectedMatchId = useRef<string | null>(null)
@@ -248,6 +252,37 @@ function MatchmakingContent() {
     redirectedMatchId.current = null
   }, [])
 
+  // When returning from a completed match, clear all match state and leave the queue
+  // to ensure we don't get redirected back to the finished match
+  useEffect(() => {
+    if (!fromMatch || fromMatchHandled.current || !userId) {
+      return
+    }
+    fromMatchHandled.current = true
+    
+    // Clear all local match state
+    cleanupMatchState()
+    lastAnnouncedMatchId.current = null
+    setMatchInitState({})
+    
+    // Leave any existing queue entries for both modes to clean up stale MATCHED state
+    // Wait for cleanup to complete before removing the fromMatch param
+    const cleanupQueues = async () => {
+      try {
+        await Promise.all([
+          leaveQueue({ variables: { userId, mode: 'free' } }).catch(() => {}),
+          leaveQueue({ variables: { userId, mode: 'ranked' } }).catch(() => {}),
+        ])
+        await refetchStatus()
+      } catch {
+        // Ignore errors - the goal is just to clean up
+      }
+      // Only remove the fromMatch parameter after cleanup is complete
+      router.replace('/matchmaking', { scroll: false })
+    }
+    cleanupQueues()
+  }, [fromMatch, userId, cleanupMatchState, leaveQueue, refetchStatus, router])
+
   useEffect(() => {
     if (deckError) {
       pushToast(deckError.message ?? 'Failed to load decklists.', 'error')
@@ -261,6 +296,10 @@ function MatchmakingContent() {
   }, [statusError, pushToast])
 
   useEffect(() => {
+    // Skip match initialization while coming from a completed match
+    if (fromMatch) {
+      return
+    }
     if (!status?.matchId || status.queued || !userId || !deckPayloadReady || !serializedSelectedDeck) {
       return
     }
@@ -297,6 +336,15 @@ function MatchmakingContent() {
       .catch(async (error: unknown) => {
         const message =
           error instanceof Error ? error.message : 'Failed to initialize match. Please retry.'
+        
+        // "Match already exists" means the backend matchmaking already created the match
+        // This is fine - treat it as success rather than an error
+        const isAlreadyExists = message.toLowerCase().includes('already exists')
+        if (isAlreadyExists) {
+          setMatchInitState((previous) => ({ ...previous, [matchId]: 'success' }))
+          return
+        }
+        
         pushToast(message, 'error')
         setMatchInitState((previous) => ({ ...previous, [matchId]: 'error' }))
         cleanupMatchState()
@@ -330,6 +378,7 @@ function MatchmakingContent() {
     refetchStatus,
     cleanupMatchState,
     deckPayloadReady,
+    fromMatch,
   ])
 
   const statusSummary = useMemo(() => {
@@ -350,10 +399,18 @@ function MatchmakingContent() {
   const showQueueMessage = isQueued
 
   useEffect(() => {
+    // Skip match found handling while fromMatch param is present
+    // The cleanup effect will remove the param via router.replace, which will
+    // update fromMatch to false and allow this effect to run normally
+    if (fromMatch) {
+      return
+    }
     if (status?.matchId && !status.queued && userId) {
+      // Check if we've already announced or started handling this match
+      const alreadyAnnounced = lastAnnouncedMatchId.current === status.matchId
       const alreadyRunning =
         status.matchId === activeMatchId || status.matchId === pendingMatchId
-      if (!alreadyRunning) {
+      if (!alreadyAnnounced && !alreadyRunning) {
         lastAnnouncedMatchId.current = status.matchId
         setPendingMatchId(status.matchId)
         setMatchCountdown(5)
@@ -375,6 +432,7 @@ function MatchmakingContent() {
     activeMatchId,
     pendingMatchId,
     pushToast,
+    fromMatch,
   ])
 
   useEffect(() => {
@@ -404,6 +462,10 @@ function MatchmakingContent() {
   }, [matchCountdown, pendingMatchId, userId])
 
   useEffect(() => {
+    // Skip while coming from a completed match
+    if (fromMatch) {
+      return
+    }
     if (!status?.matchId || status.queued || !userId) {
       return
     }
@@ -423,9 +485,14 @@ function MatchmakingContent() {
     matchCountdown,
     activeMatchId,
     activePlayerId,
+    fromMatch,
   ])
 
   useEffect(() => {
+    // Skip redirect while coming from a completed match
+    if (fromMatch) {
+      return
+    }
     if (!liveMatchReady || !activeMatchId) {
       return
     }
@@ -435,7 +502,7 @@ function MatchmakingContent() {
     redirectedMatchId.current = activeMatchId
     const target = new URLSearchParams({ matchId: activeMatchId })
     router.push(`/game?${target.toString()}`)
-  }, [liveMatchReady, activeMatchId, router])
+  }, [liveMatchReady, activeMatchId, router, fromMatch])
 
   const handleJoin = async () => {
     if (!userId) {

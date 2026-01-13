@@ -156,6 +156,7 @@ export const PLAYER_STATE_FIELDS = gql`
     }
     championLegendState {
       canActivate
+      hasManualActivation
       reason
       costSummary
       cost {
@@ -166,6 +167,7 @@ export const PLAYER_STATE_FIELDS = gql`
     }
     championLeaderState {
       canActivate
+      hasManualActivation
       reason
       costSummary
       cost {
