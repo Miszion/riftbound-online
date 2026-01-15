@@ -8,6 +8,7 @@ import {
   GAME_PROMPT_FIELDS,
   PRIORITY_WINDOW_FIELDS,
   MATCHMAKING_STATUS_FIELDS,
+  REACTION_CHAIN_FIELDS,
 } from '@/lib/graphql/fragments';
 
 // ============================================================================
@@ -21,6 +22,7 @@ export const GAME_STATE_CHANGED = gql`
   ${BATTLEFIELD_STATE_FIELDS}
   ${GAME_PROMPT_FIELDS}
   ${PRIORITY_WINDOW_FIELDS}
+  ${REACTION_CHAIN_FIELDS}
   subscription GameStateChanged($matchId: ID!) {
     gameStateChanged(matchId: $matchId) {
       matchId
@@ -77,6 +79,21 @@ export const GAME_STATE_CHANGED = gql`
         attackingUnitIds
         defendingUnitIds
         priorityStage
+      }
+      pendingSpellResolution {
+        id
+        spell {
+          ...CardStateFields
+        }
+        casterId
+        targets
+        targetDescriptions
+        createdAt
+        reactorId
+        resolved
+      }
+      reactionChain {
+        ...ReactionChainFields
       }
     }
   }

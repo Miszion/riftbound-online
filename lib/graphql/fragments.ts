@@ -39,6 +39,16 @@ export const CARD_STATE_FIELDS = gql`
         active
       }
     }
+    spellTargeting {
+      scope
+      minTargets
+      maxTargets
+      requiresSelection
+      allowFriendly
+      allowEnemy
+      mode
+      hint
+    }
   }
 `
 
@@ -240,5 +250,37 @@ export const MATCHMAKING_STATUS_FIELDS = gql`
     matchId
     opponentId
     opponentName
+  }
+`
+
+export const CHAIN_ITEM_FIELDS = gql`
+  ${CARD_STATE_FIELDS}
+  fragment ChainItemFields on ChainItem {
+    id
+    type
+    card {
+      ...CardStateFields
+    }
+    casterId
+    targets
+    targetDescriptions
+    createdAt
+    abilityName
+    sourceInstanceId
+  }
+`
+
+export const REACTION_CHAIN_FIELDS = gql`
+  ${CHAIN_ITEM_FIELDS}
+  fragment ReactionChainFields on ReactionChain {
+    id
+    items {
+      ...ChainItemFields
+    }
+    currentReactorId
+    originalCasterId
+    awaitingResponse
+    createdAt
+    lastUpdatedAt
   }
 `

@@ -19,6 +19,8 @@ import {
   REPORT_MATCH_RESULT,
   CONCEDE_MATCH,
   PASS_PRIORITY,
+  RESPOND_TO_SPELL_REACTION,
+  RESPOND_TO_CHAIN_REACTION,
   ACTIVATE_CHAMPION_POWER,
   GET_CARD_CATALOG,
   GET_DECKLISTS,
@@ -165,6 +167,14 @@ export function useSendChatMessage() {
 
 export function usePassPriority() {
   return useMutation(PASS_PRIORITY);
+}
+
+export function useRespondToSpellReaction() {
+  return useMutation(RESPOND_TO_SPELL_REACTION);
+}
+
+export function useRespondToChainReaction() {
+  return useMutation(RESPOND_TO_CHAIN_REACTION);
 }
 
 export function useReportMatchResult() {

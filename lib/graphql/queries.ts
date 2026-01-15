@@ -8,6 +8,7 @@ import {
   GAME_PROMPT_FIELDS,
   PRIORITY_WINDOW_FIELDS,
   MATCHMAKING_STATUS_FIELDS,
+  REACTION_CHAIN_FIELDS,
 } from '@/lib/graphql/fragments';
 
 // ============================================================================
@@ -52,6 +53,7 @@ export const GET_MATCH = gql`
   ${BATTLEFIELD_STATE_FIELDS}
   ${GAME_PROMPT_FIELDS}
   ${PRIORITY_WINDOW_FIELDS}
+  ${REACTION_CHAIN_FIELDS}
   query GetMatch($matchId: ID!) {
     match(matchId: $matchId) {
       matchId
@@ -110,6 +112,21 @@ export const GET_MATCH = gql`
         attackingUnitIds
         defendingUnitIds
         priorityStage
+      }
+      pendingSpellResolution {
+        id
+        spell {
+          ...CardStateFields
+        }
+        casterId
+        targets
+        targetDescriptions
+        createdAt
+        reactorId
+        resolved
+      }
+      reactionChain {
+        ...ReactionChainFields
       }
     }
   }
@@ -888,6 +905,66 @@ export const PASS_PRIORITY = gql`
           attackingUnitIds
           defendingUnitIds
           priorityStage
+        }
+      }
+      currentPhase
+    }
+  }
+`;
+
+export const RESPOND_TO_SPELL_REACTION = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
+  mutation RespondToSpellReaction($matchId: ID!, $playerId: ID!, $pass: Boolean!) {
+    respondToSpellReaction(matchId: $matchId, playerId: $playerId, pass: $pass) {
+      success
+      gameState {
+        matchId
+        players {
+          ...PlayerStateFields
+        }
+        currentPhase
+        turnNumber
+        currentPlayerIndex
+        status
+        focusPlayerId
+        pendingSpellResolution {
+          id
+          spell {
+            ...CardStateFields
+          }
+          casterId
+          targets
+          targetDescriptions
+          createdAt
+          reactorId
+          resolved
+        }
+      }
+      currentPhase
+    }
+  }
+`;
+
+export const RESPOND_TO_CHAIN_REACTION = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
+  ${REACTION_CHAIN_FIELDS}
+  mutation RespondToChainReaction($matchId: ID!, $playerId: ID!, $pass: Boolean!) {
+    respondToChainReaction(matchId: $matchId, playerId: $playerId, pass: $pass) {
+      success
+      gameState {
+        matchId
+        players {
+          ...PlayerStateFields
+        }
+        currentPhase
+        turnNumber
+        currentPlayerIndex
+        status
+        focusPlayerId
+        reactionChain {
+          ...ReactionChainFields
         }
       }
       currentPhase

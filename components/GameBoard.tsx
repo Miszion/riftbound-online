@@ -31,6 +31,8 @@ import {
   useRecordDuelLogEntry,
   useSendChatMessage,
   usePassPriority,
+  useRespondToSpellReaction,
+  useRespondToChainReaction,
   useActivateChampionPower,
   useSubmitTargetSelection,
 } from '@/hooks/useGraphQL';
@@ -46,6 +48,17 @@ import recruitImg from '@/public/images/recruit.jpg';
 type CardAsset = {
   remote?: string | null;
   localPath?: string | null;
+};
+
+type SpellTargetingInfo = {
+  scope?: string | null;
+  minTargets?: number | null;
+  maxTargets?: number | null;
+  requiresSelection?: boolean | null;
+  allowFriendly?: boolean | null;
+  allowEnemy?: boolean | null;
+  mode?: string | null;
+  hint?: string | null;
 };
 
 type BaseCard = {
@@ -73,6 +86,7 @@ type BaseCard = {
     zone: 'base' | 'battlefield';
     battlefieldId?: string | null;
   } | null;
+  spellTargeting?: SpellTargetingInfo | null;
 };
 
 type CardHoverOptions = {
@@ -535,6 +549,41 @@ type GamePrompt = {
   resolution?: Record<string, any> | null;
 };
 
+type PendingSpellResolution = {
+  id: string;
+  spell: BaseCard;
+  casterId: string;
+  targets: string[];
+  targetDescriptions: string[];
+  createdAt: string;
+  reactorId: string;
+  resolved: boolean;
+};
+
+type ChainItemType = 'spell' | 'triggered_ability' | 'activated_ability';
+
+type ChainItem = {
+  id: string;
+  type: ChainItemType;
+  card: BaseCard;
+  casterId: string;
+  targets: string[];
+  targetDescriptions: string[];
+  createdAt: string;
+  abilityName?: string | null;
+  sourceInstanceId?: string | null;
+};
+
+type ReactionChain = {
+  id: string;
+  items: ChainItem[];
+  currentReactorId: string;
+  originalCasterId: string;
+  awaitingResponse: boolean;
+  createdAt: string;
+  lastUpdatedAt: string;
+};
+
 type PriorityWindow = {
   id: string;
   type: string;
@@ -646,6 +695,8 @@ type SpectatorGameState = {
   chatLog?: ChatMessageEntry[];
   focusPlayerId?: string | null;
   combatContext?: CombatContextState | null;
+  pendingSpellResolution?: PendingSpellResolution | null;
+  reactionChain?: ReactionChain | null;
 };
 
 interface GameBoardProps {
@@ -1909,6 +1960,110 @@ const DiscardModal = ({
   </div>
 );
 
+type SpellTargetingModalProps = {
+  spellName: string;
+  cards: BaseCard[];
+  selection: string[];
+  min: number;
+  max: number;
+  loading: boolean;
+  scopeLabel: string;
+  canConfirm: boolean;
+  onToggle: (instanceId: string) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+};
+
+const SpellTargetingModal = ({
+  spellName,
+  cards,
+  selection,
+  min,
+  max,
+  loading,
+  scopeLabel,
+  canConfirm,
+  onToggle,
+  onConfirm,
+  onCancel
+}: SpellTargetingModalProps) => (
+  <div className="modal-backdrop">
+    <div className="mulligan-modal" role="dialog" aria-modal="true">
+      <div className="mulligan-modal__header">
+        <div>
+          <p className="mulligan-modal__eyebrow">Cast Spell</p>
+          <h3>Select Target{max !== 1 ? 's' : ''} for {spellName}</h3>
+        </div>
+        <div className="mulligan-modal__limit">
+          Choose
+          {min === max
+            ? ` ${max}`
+            : ` ${min}${max ? `–${max}` : '+'}`} {scopeLabel.toLowerCase()}
+          {max === 1 ? '' : 's'}
+        </div>
+      </div>
+      <p className="mulligan-count">
+        Selected {selection.length}
+        {max ? ` / ${max}` : ''}
+      </p>
+      <div className="mulligan-card-grid">
+        {cards.length === 0 ? (
+          <div className="mulligan-source">No valid targets available.</div>
+        ) : (
+          cards.map((card, index) => {
+            const instanceId = card.instanceId ?? `${card.cardId}-${index}`;
+            const isSelected = selection.includes(instanceId);
+            const disabled = loading;
+            const handleClick = () => {
+              if (!disabled) {
+                onToggle(instanceId);
+              }
+            };
+            return (
+              <button
+                key={`${card.cardId}-${instanceId}-${index}`}
+                type="button"
+                className={[
+                  'mulligan-card-button',
+                  isSelected ? 'mulligan-card-button--selected' : '',
+                  disabled ? 'mulligan-card-button--disabled' : ''
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+                onClick={handleClick}
+                disabled={disabled}
+              >
+                <CardTile card={card} widthPx={165} selectable={!disabled} isSelected={isSelected} />
+                <span className="mulligan-card-button__tag">
+                  {isSelected ? 'Selected' : 'Target'}
+                </span>
+              </button>
+            );
+          })
+        )}
+      </div>
+      <div className="mulligan-actions">
+        <button
+          type="button"
+          className="mulligan-action-button mulligan-action-button--secondary"
+          onClick={onCancel}
+          disabled={loading}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="mulligan-action-button mulligan-action-button--primary"
+          onClick={onConfirm}
+          disabled={loading || !canConfirm || cards.length === 0}
+        >
+          {loading ? 'Casting…' : 'Cast Spell'}
+        </button>
+      </div>
+    </div>
+  </div>
+);
+
 type TargetSelectionModalProps = {
   cards: BaseCard[];
   selection: string[];
@@ -2014,6 +2169,129 @@ const TargetSelectionModal = ({
     </div>
   </div>
 );
+
+type SpellReactionModalProps = {
+  spell: BaseCard | null;
+  casterName: string;
+  targetDescriptions: string[];
+  waitingMessage?: string | null;
+  loading: boolean;
+  onPass: () => void;
+};
+
+const SpellReactionModal = ({
+  spell,
+  casterName,
+  targetDescriptions,
+  waitingMessage,
+  loading,
+  onPass,
+}: SpellReactionModalProps) => (
+  <div className="modal-backdrop">
+    <div className="mulligan-modal spell-reaction-modal" role="dialog" aria-modal="true">
+      {waitingMessage ? (
+        <div className="mulligan-waiting" role="status">
+          <span className="phase-spinner" aria-hidden="true" />
+          <p>{waitingMessage}</p>
+        </div>
+      ) : (
+        <>
+          <div className="mulligan-modal__header">
+            <div>
+              <p className="mulligan-modal__eyebrow">⚡ Spell Cast</p>
+              <h3>{casterName} is casting {spell?.name ?? 'a spell'}</h3>
+              {targetDescriptions.length > 0 && (
+                <p className="mulligan-source">
+                  Targeting: {targetDescriptions.join(', ')}
+                </p>
+              )}
+            </div>
+          </div>
+          {spell && (
+            <div className="spell-reaction-preview">
+              <CardTile card={spell} widthPx={200} selectable={false} />
+            </div>
+          )}
+          <div className="spell-reaction-prompt">
+            <p>Do you want to play a REACTION card in response?</p>
+            <p className="muted-text">
+              Play a reaction from your hand, or pass to let the spell resolve.
+            </p>
+          </div>
+          <div className="mulligan-actions spell-reaction-actions">
+            <button
+              type="button"
+              className="mulligan-action-button mulligan-action-button--secondary"
+              onClick={onPass}
+              disabled={loading}
+            >
+              {loading ? 'Resolving…' : 'Pass (Let Spell Resolve)'}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  </div>
+);
+
+type ChainReactionBannerProps = {
+  chain: ReactionChain;
+  playerId: string;
+  resolvePlayerName: (id: string, fallback: string) => string;
+  isWaiting: boolean;
+  opponentName: string;
+};
+
+const ChainReactionBanner = ({
+  chain,
+  playerId,
+  resolvePlayerName,
+  isWaiting,
+  opponentName,
+}: ChainReactionBannerProps) => {
+  const topItem = chain.items[chain.items.length - 1];
+  const isMyTurn = chain.currentReactorId === playerId;
+
+  const getTopItemLabel = (): string => {
+    if (!topItem) return 'Chain active';
+    const casterName = resolvePlayerName(topItem.casterId, 'Unknown');
+    if (topItem.type === 'spell') {
+      return `${casterName} cast ${topItem.card?.name ?? 'a spell'}`;
+    } else if (topItem.type === 'triggered_ability') {
+      return `${topItem.abilityName ?? 'Triggered ability'} from ${topItem.card?.name ?? 'a card'}`;
+    } else if (topItem.type === 'activated_ability') {
+      return `${casterName} activated ${topItem.abilityName ?? 'ability'}`;
+    }
+    return 'Chain active';
+  };
+
+  return (
+    <div className={`chain-reaction-banner ${isWaiting ? 'chain-reaction-banner--waiting' : ''}`}>
+      <div className="chain-reaction-banner__icon">⚔️</div>
+      <div className="chain-reaction-banner__content">
+        <span className="chain-reaction-banner__title">
+          Reaction Chain ({chain.items.length})
+        </span>
+        <span className="chain-reaction-banner__detail">
+          {isWaiting 
+            ? `Waiting for ${opponentName} to respond…`
+            : getTopItemLabel()
+          }
+        </span>
+        {isMyTurn && !isWaiting && (
+          <span className="chain-reaction-banner__hint">
+            Play a REACTION or use Pass button below
+          </span>
+        )}
+      </div>
+      {isWaiting && (
+        <div className="chain-reaction-banner__spinner">
+          <span className="phase-spinner" aria-hidden="true" />
+        </div>
+      )}
+    </div>
+  );
+};
 
 const ConcedeConfirmModal = ({
   loading,
@@ -2215,6 +2493,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const [recordDuelLogEntryMutation] = useRecordDuelLogEntry();
   const [sendChatMessageMutation] = useSendChatMessage();
   const [passPriority, { loading: passingPriority }] = usePassPriority();
+  const [respondToSpellReaction, { loading: respondingToSpell }] = useRespondToSpellReaction();
+  const [respondToChainReaction, { loading: respondingToChain }] = useRespondToChainReaction();
   const [activateChampionPower, { loading: activatingChampion }] = useActivateChampionPower();
 
   const router = useRouter();
@@ -2235,9 +2515,21 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const [mulliganSelection, setMulliganSelection] = useState<number[]>([]);
   const [discardSelection, setDiscardSelection] = useState<string[]>([]);
   const [targetSelection, setTargetSelection] = useState<string[]>([]);
+  const [spellTargetSelection, setSpellTargetSelection] = useState<string[]>([]);
   const [selectedUnit, setSelectedUnit] = useState<string | null>(null);
   const [pendingDeployment, setPendingDeployment] = useState<number | null>(null);
   const [pendingLeaderDeployment, setPendingLeaderDeployment] = useState(false);
+  const [pendingSpellTargeting, setPendingSpellTargeting] = useState<{
+    cardIndex: number;
+    animateKey: string | null;
+    targeting: SpellTargetingInfo;
+  } | null>(null);
+  const [pendingAccelerate, setPendingAccelerate] = useState<{
+    cardIndex: number;
+    destinationId: string | null;
+    animateKey: string | null;
+    hint: AccelerateHint;
+  } | null>(null);
   const [commencingBattlefieldId, setCommencingBattlefieldId] = useState<string | null>(null);
   const [optimisticUnitTaps, setOptimisticUnitTaps] = useState<Set<string>>(new Set());
   const optimisticTapCount = optimisticUnitTaps.size;
@@ -2535,9 +2827,12 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     if (!card) {
       return 'Select a unit to move.';
     }
+    // Tapped/exhausted units cannot move until they untap
     if (Boolean(card.isTapped ?? card.tapped)) {
       return 'Exhausted units must finish the Awaken step before moving.';
     }
+    // Units with summoning sickness cannot move (unless they entered ready via accelerate,
+    // in which case summoned=false is set by the backend)
     if (card.summoned) {
       return 'Units cannot move on the turn they enter play.';
     }
@@ -3116,6 +3411,14 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     () => prompts.filter((prompt) => prompt.type === 'target'),
     [prompts]
   );
+  const spellReactionPrompts = useMemo(
+    () => prompts.filter((prompt) => prompt.type === 'spell_reaction'),
+    [prompts]
+  );
+  const chainReactionPrompts = useMemo(
+    () => prompts.filter((prompt) => prompt.type === 'chain_reaction'),
+    [prompts]
+  );
   const playerDiscardPrompt =
     discardPrompts.find((prompt) => prompt.playerId === playerId && !prompt.resolved) ?? null;
   const opponentDiscardPending = useMemo(
@@ -3139,6 +3442,33 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       ),
     [opponentPlayerId, targetPrompts]
   );
+
+  // Spell Reaction prompt: shows when opponent casts a spell targeting something
+  const playerSpellReactionPrompt =
+    spellReactionPrompts.find((prompt) => prompt.playerId === playerId && !prompt.resolved) ?? null;
+  const opponentSpellReactionPending = useMemo(
+    () =>
+      Boolean(
+        opponentPlayerId &&
+          spellReactionPrompts.some((prompt) => prompt.playerId === opponentPlayerId && !prompt.resolved)
+      ),
+    [opponentPlayerId, spellReactionPrompts]
+  );
+
+  // Chain Reaction prompt: shows when there's an active chain and player can respond
+  const playerChainReactionPrompt =
+    chainReactionPrompts.find((prompt) => prompt.playerId === playerId && !prompt.resolved) ?? null;
+  const opponentChainReactionPending = useMemo(
+    () =>
+      Boolean(
+        opponentPlayerId &&
+          chainReactionPrompts.some((prompt) => prompt.playerId === opponentPlayerId && !prompt.resolved)
+      ),
+    [opponentPlayerId, chainReactionPrompts]
+  );
+
+  // Get active reaction chain from game state
+  const reactionChain = spectatorState?.reactionChain ?? null;
 
   const targetScope = (playerTargetPrompt?.data?.scope as string) ?? 'unit';
   const targetSelectionMax = playerTargetPrompt
@@ -3166,12 +3496,24 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       const enemy = targetAllowOpponent ? opponentCreatures : [];
       return [...friendly, ...enemy];
     }
+    if (targetScope === 'battlefield') {
+      // Return battlefields as target candidates (convert to BaseCard-like format)
+      return (spectatorState?.battlefields ?? []).map((bf: any) => ({
+        cardId: bf.battlefieldId,
+        instanceId: bf.battlefieldId,
+        name: bf.name,
+        type: 'Battlefield',
+        text: bf.card?.text ?? '',
+        assets: bf.card?.assets ?? null,
+      }));
+    }
     return [];
   }, [
     opponentCreatures,
     playerCreatures,
     playerGraveyard,
     playerTargetPrompt,
+    spectatorState?.battlefields,
     targetAllowFriendly,
     targetAllowOpponent,
     targetScope
@@ -3192,6 +3534,178 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       setTargetSelection([]);
     }
   }, [playerTargetPrompt]);
+
+  // Clear spell target selection when pendingSpellTargeting is cleared
+  useEffect(() => {
+    if (!pendingSpellTargeting) {
+      setSpellTargetSelection([]);
+    }
+  }, [pendingSpellTargeting]);
+
+  // Spell targeting computations
+  const spellTargetScope = pendingSpellTargeting?.targeting?.scope ?? 'none';
+  const spellTargetMin = pendingSpellTargeting?.targeting?.minTargets ?? 0;
+  const spellTargetMax = pendingSpellTargeting?.targeting?.maxTargets ?? 1;
+  const spellTargetAllowFriendly = pendingSpellTargeting?.targeting?.allowFriendly !== false;
+  const spellTargetAllowEnemy = pendingSpellTargeting?.targeting?.allowEnemy !== false;
+  
+  const spellTargetCandidates = useMemo(() => {
+    if (!pendingSpellTargeting) {
+      return [];
+    }
+    const scope = spellTargetScope;
+    
+    switch (scope) {
+      case 'ally_unit':
+        return playerCreatures;
+      case 'enemy_unit':
+        return opponentCreatures;
+      case 'any_unit':
+      case 'unit': {
+        const friendly = spellTargetAllowFriendly ? playerCreatures : [];
+        const enemy = spellTargetAllowEnemy ? opponentCreatures : [];
+        return [...friendly, ...enemy];
+      }
+      case 'ally_units':
+        return playerCreatures;
+      case 'enemy_units':
+        return opponentCreatures;
+      case 'all_units':
+        return [...playerCreatures, ...opponentCreatures];
+      case 'battlefield':
+        return (spectatorState?.battlefields ?? []).map((bf: any) => ({
+          cardId: bf.battlefieldId,
+          instanceId: bf.battlefieldId,
+          name: bf.name,
+          type: 'Battlefield',
+          text: bf.card?.text ?? '',
+          assets: bf.card?.assets ?? null,
+        }));
+      case 'graveyard':
+        return playerGraveyard;
+      case 'player':
+        // Return players as targets
+        return [
+          { instanceId: playerId, name: currentPlayer.name ?? 'You', type: 'Player' },
+          { instanceId: opponentPlayerId, name: 'Opponent', type: 'Player' }
+        ].filter((p) => p.instanceId);
+      default:
+        return [];
+    }
+  }, [
+    pendingSpellTargeting,
+    spellTargetScope,
+    spellTargetAllowFriendly,
+    spellTargetAllowEnemy,
+    playerCreatures,
+    opponentCreatures,
+    playerGraveyard,
+    spectatorState?.battlefields,
+    playerId,
+    opponentPlayerId,
+    currentPlayer.name
+  ]);
+
+  const pendingSpellCard = pendingSpellTargeting
+    ? currentPlayer.hand[pendingSpellTargeting.cardIndex]
+    : null;
+
+  // Track the targeting session to avoid duplicate toasts
+  const spellTargetingNotifiedRef = useRef<string | null>(null);
+  // Track the chain reaction session to avoid duplicate toasts
+  const chainReactionNotifiedRef = useRef<string | null>(null);
+
+  // Show toast when spell targeting begins
+  useEffect(() => {
+    if (pendingSpellTargeting && pendingSpellCard) {
+      // Create a unique key for this targeting session
+      const targetingKey = `${pendingSpellTargeting.cardIndex}-${pendingSpellCard.instanceId ?? pendingSpellCard.cardId}`;
+      
+      // Only notify if we haven't already notified for this targeting session
+      if (spellTargetingNotifiedRef.current !== targetingKey) {
+        spellTargetingNotifiedRef.current = targetingKey;
+        const scopeLabel = pendingSpellTargeting.targeting?.scope === 'ally_unit'
+          ? 'friendly unit'
+          : pendingSpellTargeting.targeting?.scope === 'enemy_unit'
+            ? 'enemy unit'
+            : pendingSpellTargeting.targeting?.scope === 'any_unit'
+              ? 'unit'
+              : 'target';
+        notify(
+          `🎯 Select a ${scopeLabel} for ${pendingSpellCard.name ?? 'spell'}`,
+          'warning',
+          { banner: true }
+        );
+      }
+    } else {
+      // Reset when targeting ends
+      spellTargetingNotifiedRef.current = null;
+    }
+  }, [pendingSpellTargeting, pendingSpellCard, notify]);
+
+  // Show toast when player receives a spell reaction prompt (opponent is casting a targeting spell)
+  const pendingSpell = spectatorState?.pendingSpellResolution ?? null;
+  useEffect(() => {
+    if (playerSpellReactionPrompt && pendingSpell) {
+      const spellName = pendingSpell.spell?.name ?? 'a spell';
+      const targetDesc = pendingSpell.targetDescriptions?.[0] ?? 'something';
+      notify(
+        `⚡ ${spellName} targeting ${targetDesc} — React or let it resolve?`,
+        'warning',
+        { banner: true }
+      );
+    }
+  }, [playerSpellReactionPrompt, pendingSpell, notify]);
+
+  // Show toast when player receives a chain reaction prompt
+  useEffect(() => {
+    if (playerChainReactionPrompt && reactionChain) {
+      const topItem = reactionChain.items[reactionChain.items.length - 1];
+      const chainKey = `${reactionChain.id}-${reactionChain.items.length}`;
+      
+      if (chainReactionNotifiedRef.current !== chainKey) {
+        chainReactionNotifiedRef.current = chainKey;
+        const itemName = topItem?.type === 'spell' 
+          ? topItem?.card?.name ?? 'a spell'
+          : topItem?.abilityName ?? 'an ability';
+        notify(
+          `⚔️ Reaction Chain: ${itemName} — Play a REACTION or pass!`,
+          'warning',
+          { banner: true }
+        );
+      }
+    } else {
+      // Reset when chain prompt ends
+      chainReactionNotifiedRef.current = null;
+    }
+  }, [playerChainReactionPrompt, reactionChain, notify]);
+  
+  const canConfirmSpellTarget =
+    pendingSpellTargeting &&
+    spellTargetSelection.length >= spellTargetMin &&
+    (spellTargetMax === 0 || spellTargetSelection.length <= spellTargetMax);
+
+  // Helper to check if a card is a valid spell target
+  const isValidSpellTarget = useCallback(
+    (card: BaseCard): boolean => {
+      if (!pendingSpellTargeting) return false;
+      const instanceId = card.instanceId;
+      if (!instanceId) return false;
+      return spellTargetCandidates.some((c) => c.instanceId === instanceId);
+    },
+    [pendingSpellTargeting, spellTargetCandidates]
+  );
+
+  // Helper to check if a card is selected as spell target
+  const isSpellTargetSelected = useCallback(
+    (card: BaseCard): boolean => {
+      const instanceId = card.instanceId;
+      if (!instanceId) return false;
+      return spellTargetSelection.includes(instanceId);
+    },
+    [spellTargetSelection]
+  );
+
   const opponentCoinFlipPrompt = useMemo(() => {
     if (!opponentPlayerId) {
       return null;
@@ -3783,42 +4297,26 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     resolvePlayerLabel,
   ]);
 
-  const handlePlayCard = useCallback(
+  const executePlayCard = useCallback(
     async (
       cardIndex: number,
-      destinationId?: string | null,
-      options?: { animateKey?: string | null }
+      destinationId: string | null,
+      useAccelerate: boolean,
+      animateKey?: string | null
     ) => {
-      if (!canPlayCards) {
-        return;
-      }
       const card = currentPlayer.hand[cardIndex];
       if (!card) {
         return;
       }
-      const accelerateHint = getAccelerateHint(card);
-      let useAccelerate = false;
-      let paymentCard = card;
-      if (accelerateHint) {
-        const acceleratedCard = augmentCardForAccelerate(card, accelerateHint);
-        const acceleratePlan = evaluateRunePayment(acceleratedCard, playerRunes);
-        if (acceleratePlan.canPay && typeof window !== 'undefined') {
-          const promptMessage = `${card.name ?? 'This unit'} has Accelerate.\nPay ${describeAccelerateCost(
-            accelerateHint
-          )} to have it enter ready?`;
-          useAccelerate = window.confirm(promptMessage);
-          if (useAccelerate) {
-            paymentCard = acceleratedCard;
-          }
-        }
-      }
+      const accelerateHint = useAccelerate ? getAccelerateHint(card) : null;
+      const paymentCard = accelerateHint ? augmentCardForAccelerate(card, accelerateHint) : card;
       const runePlan = evaluateRunePayment(paymentCard, playerRunes);
       if (!runePlan.canPay) {
         notify('Insufficient runes to play this card.', 'warning', { banner: true });
         return;
       }
-      if (options?.animateKey) {
-        triggerHandAnimation(options.animateKey);
+      if (animateKey) {
+        triggerHandAnimation(animateKey);
       }
       try {
         await playCard({
@@ -3838,7 +4336,6 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       }
     },
     [
-      canPlayCards,
       currentPlayer.hand,
       matchId,
       notify,
@@ -3847,6 +4344,69 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       playerRunes,
       refreshArenaState,
       triggerHandAnimation,
+    ]
+  );
+
+  const handlePlayCard = useCallback(
+    async (
+      cardIndex: number,
+      destinationId?: string | null,
+      options?: { animateKey?: string | null; skipAcceleratePrompt?: boolean; useAccelerate?: boolean }
+    ) => {
+      if (!canPlayCards) {
+        return;
+      }
+      const card = currentPlayer.hand[cardIndex];
+      if (!card) {
+        return;
+      }
+
+      // If accelerate decision is already made, execute directly
+      if (options?.skipAcceleratePrompt) {
+        await executePlayCard(cardIndex, destinationId ?? null, options.useAccelerate ?? false, options.animateKey);
+        return;
+      }
+
+      const accelerateHint = getAccelerateHint(card);
+      if (accelerateHint) {
+        // Check if we can afford the base card
+        const basePlan = evaluateRunePayment(card, playerRunes);
+        if (!basePlan.canPay) {
+          notify('Insufficient runes to play this card.', 'warning', { banner: true });
+          return;
+        }
+        // Check if we can afford accelerate
+        const acceleratedCard = augmentCardForAccelerate(card, accelerateHint);
+        const acceleratePlan = evaluateRunePayment(acceleratedCard, playerRunes);
+        if (acceleratePlan.canPay) {
+          // Only show accelerate prompt if player can afford it
+          setPendingAccelerate({
+            cardIndex,
+            destinationId: destinationId ?? null,
+            animateKey: options?.animateKey ?? null,
+            hint: accelerateHint,
+          });
+          return;
+        }
+        // Can't afford accelerate, play directly without it (enters exhausted)
+        await executePlayCard(cardIndex, destinationId ?? null, false, options?.animateKey);
+        return;
+      }
+
+      // No accelerate option, play directly
+      const runePlan = evaluateRunePayment(card, playerRunes);
+      if (!runePlan.canPay) {
+        notify('Insufficient runes to play this card.', 'warning', { banner: true });
+        return;
+      }
+      await executePlayCard(cardIndex, destinationId ?? null, false, options?.animateKey);
+    },
+    [
+      canPlayCards,
+      currentPlayer.hand,
+      executePlayCard,
+      notify,
+      playerRunes,
     ]
   );
 
@@ -4121,6 +4681,13 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   );
   const handFocusStates = useMemo(
     () => {
+      // Highlight REACTION cards when player has spell reaction prompt or chain reaction prompt
+      if (playerSpellReactionPrompt || playerChainReactionPrompt) {
+        return currentPlayer.hand.map((card) => {
+          const isReaction = cardSupportsCombatTiming(card, 'reaction');
+          return isReaction ? 'reaction' : null;
+        });
+      }
       if (!hasCombatPriority || !combatStage) {
         return currentPlayer.hand.map(() => null);
       }
@@ -4128,7 +4695,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         cardSupportsCombatTiming(card, combatStage) ? combatStage : null
       );
     },
-    [combatStage, currentPlayer.hand, hasCombatPriority]
+    [combatStage, currentPlayer.hand, hasCombatPriority, playerChainReactionPrompt, playerSpellReactionPrompt]
   );
 
   const toggleMulliganSelection = (index: number) => {
@@ -4183,6 +4750,98 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     [playerTargetPrompt, targetSelectionMax]
   );
 
+  const toggleSpellTargetSelection = useCallback(
+    (instanceId: string) => {
+      if (!pendingSpellTargeting) {
+        return;
+      }
+      setSpellTargetSelection((prev) => {
+        if (prev.includes(instanceId)) {
+          return prev.filter((value) => value !== instanceId);
+        }
+        if (spellTargetMax && prev.length >= spellTargetMax) {
+          return prev;
+        }
+        return [...prev, instanceId];
+      });
+    },
+    [pendingSpellTargeting, spellTargetMax]
+  );
+
+  const confirmSpellWithTargets = useCallback(async () => {
+    if (!pendingSpellTargeting || !canConfirmSpellTarget) {
+      return;
+    }
+    
+    const { cardIndex, animateKey } = pendingSpellTargeting;
+    const targets = [...spellTargetSelection];
+    
+    // Clear pending state before playing
+    setPendingSpellTargeting(null);
+    setSpellTargetSelection([]);
+    
+    if (animateKey) {
+      triggerHandAnimation(animateKey);
+    }
+    
+    try {
+      await playCard({
+        variables: {
+          matchId,
+          playerId,
+          cardIndex,
+          targets,
+          destinationId: null,
+        },
+      });
+      notify('Spell cast.', 'success', { banner: true });
+      await refreshArenaState();
+    } catch (error) {
+      console.error('Failed to cast spell', error);
+      notify('Failed to cast spell.', 'error', { banner: true });
+    }
+  }, [
+    pendingSpellTargeting,
+    canConfirmSpellTarget,
+    spellTargetSelection,
+    triggerHandAnimation,
+    playCard,
+    matchId,
+    playerId,
+    refreshArenaState,
+    notify
+  ]);
+
+  const cancelSpellTargeting = useCallback(() => {
+    setPendingSpellTargeting(null);
+    setSpellTargetSelection([]);
+  }, []);
+
+  // Handle clicking a spell target on the battlefield
+  const handleSpellTargetClick = useCallback(
+    (card: BaseCard) => {
+      if (!pendingSpellTargeting) return;
+      const instanceId = card.instanceId;
+      if (!instanceId || !isValidSpellTarget(card)) return;
+      
+      toggleSpellTargetSelection(instanceId);
+      
+      // Auto-confirm if we've selected the max targets (for single-target spells)
+      const willBeSelected = !spellTargetSelection.includes(instanceId);
+      const newCount = willBeSelected 
+        ? spellTargetSelection.length + 1 
+        : spellTargetSelection.length - 1;
+      
+      if (willBeSelected && spellTargetMax === 1 && newCount === 1) {
+        // For single-target spells, immediately cast when target is selected
+        setTimeout(() => {
+          confirmSpellWithTargets();
+        }, 100);
+      }
+    },
+    [pendingSpellTargeting, isValidSpellTarget, toggleSpellTargetSelection, spellTargetSelection, spellTargetMax, confirmSpellWithTargets]
+  );
+
   const handleHandCardClick = (index: number) => {
     if (mulliganPrompt) {
       toggleMulliganSelection(index);
@@ -4202,6 +4861,21 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       return;
     }
     const cardType = (card.type ?? '').toUpperCase();
+    
+    // Check if this is a spell that requires targeting
+    if (cardType === 'SPELL') {
+      const targeting = card.spellTargeting;
+      if (targeting?.requiresSelection && (targeting.minTargets ?? 0) > 0) {
+        // This spell requires targeting - enter targeting mode
+        setPendingSpellTargeting({
+          cardIndex: index,
+          animateKey: cardKey,
+          targeting
+        });
+        return;
+      }
+    }
+    
     if (cardType === 'CREATURE') {
       // Check deployment permissions for this card
       const cardPerms = getCardBattlefieldDeploymentPermissions(card);
@@ -4555,6 +5229,44 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       notify('Unable to pass priority right now.', 'error', { banner: true });
     }
   }, [combatContext, focusPlayerIdState, matchId, notify, passPriority, playerId]);
+
+  const handleSpellReactionPass = useCallback(async () => {
+    if (!playerSpellReactionPrompt) {
+      return;
+    }
+    try {
+      await respondToSpellReaction({
+        variables: {
+          matchId,
+          playerId,
+          pass: true,
+        },
+      });
+      notify('Spell resolves.', 'info', { banner: true });
+    } catch (error) {
+      console.error('Failed to pass spell reaction', error);
+      notify('Unable to pass right now.', 'error', { banner: true });
+    }
+  }, [matchId, notify, playerId, playerSpellReactionPrompt, respondToSpellReaction]);
+
+  const handleChainReactionPass = useCallback(async () => {
+    if (!playerChainReactionPrompt) {
+      return;
+    }
+    try {
+      await respondToChainReaction({
+        variables: {
+          matchId,
+          playerId,
+          pass: true,
+        },
+      });
+      notify('Passing on chain.', 'info', { banner: true });
+    } catch (error) {
+      console.error('Failed to pass chain reaction', error);
+      notify('Unable to pass right now.', 'error', { banner: true });
+    }
+  }, [matchId, notify, playerId, playerChainReactionPrompt, respondToChainReaction]);
 
   const handleChampionLegendActivate = useCallback(async () => {
     if (!matchId || !playerId) {
@@ -4991,6 +5703,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       : pendingDeployment != null
         ? resolveHandCardKey(null, pendingDeployment)
         : null;
+  const pendingAccelerateCard =
+    pendingAccelerate != null ? currentPlayer.hand[pendingAccelerate.cardIndex] ?? null : null;
   const trackedBattlefieldStatuses = battlefieldStatus.filter((entry) => {
     if (!entry.playerId) {
       return false;
@@ -5192,6 +5906,18 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     combatFocusRef.current = hasCombatPriority;
   }, [hasCombatPriority]);
 
+  // Scroll to hand when player receives a chain reaction prompt
+  const chainReactionScrollRef = useRef(false);
+  useEffect(() => {
+    if (playerChainReactionPrompt && !chainReactionScrollRef.current && playerHandRef.current) {
+      playerHandRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      chainReactionScrollRef.current = true;
+    }
+    if (!playerChainReactionPrompt) {
+      chainReactionScrollRef.current = false;
+    }
+  }, [playerChainReactionPrompt]);
+
   const opponentHeading = resolvePlayerLabel(opponentPlayerId, 'Opponent');
   const selfHeading = resolvePlayerLabel(playerId, 'You');
   const playerVictoryPoints =
@@ -5344,7 +6070,9 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       ? 'Graveyard Card'
       : targetScope === 'unit'
         ? 'Unit'
-        : 'Target';
+        : targetScope === 'battlefield'
+          ? 'Battlefield'
+          : 'Target';
   const targetWaitingMessage =
     !playerTargetPrompt && opponentTargetPending
       ? `Waiting for ${opponentHeading} to choose targets…`
@@ -5352,6 +6080,50 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const showTargetModal = Boolean(
     (playerTargetPrompt || targetWaitingMessage) && !showInitiativeScreen && !showBattlefieldScreen
   );
+  
+  // Spell targeting modal display
+  const spellScopeLabel =
+    spellTargetScope === 'ally_unit'
+      ? 'Ally Unit'
+      : spellTargetScope === 'enemy_unit'
+        ? 'Enemy Unit'
+        : spellTargetScope === 'any_unit' || spellTargetScope === 'unit'
+          ? 'Unit'
+          : spellTargetScope === 'ally_units'
+            ? 'Ally Units'
+            : spellTargetScope === 'enemy_units'
+              ? 'Enemy Units'
+              : spellTargetScope === 'all_units'
+                ? 'Units'
+                : spellTargetScope === 'battlefield'
+                  ? 'Battlefield'
+                  : spellTargetScope === 'graveyard'
+                    ? 'Graveyard Card'
+                    : spellTargetScope === 'player'
+                      ? 'Player'
+                      : 'Target';
+  const showSpellTargetModal = Boolean(
+    pendingSpellTargeting && !showInitiativeScreen && !showBattlefieldScreen
+  );
+
+  // Spell reaction display: shows when opponent has cast a spell and you can react
+  const spellReactionWaitingMessage =
+    !playerSpellReactionPrompt && opponentSpellReactionPending
+      ? `Waiting for ${opponentHeading} to respond to spell…`
+      : null;
+  const showSpellReactionModal = Boolean(
+    (playerSpellReactionPrompt || spellReactionWaitingMessage) && pendingSpell && !showInitiativeScreen && !showBattlefieldScreen
+  );
+  
+  // Chain reaction display: shows when there's an active reaction chain
+  const chainReactionWaitingMessage =
+    !playerChainReactionPrompt && opponentChainReactionPending
+      ? `Waiting for ${opponentHeading} to respond to chain…`
+      : null;
+  const showChainReactionModal = Boolean(
+    (playerChainReactionPrompt || chainReactionWaitingMessage) && reactionChain && !showInitiativeScreen && !showBattlefieldScreen
+  );
+  
   const selfBoardTitle = selfHeading === 'You' ? 'Your Board' : `${selfHeading}'s Board`;
   const initiativeWinnerDisplay = initiativeOutcome
     ? resolvePlayerLabel(initiativeOutcome.winnerId, 'Unknown duelist')
@@ -5756,6 +6528,25 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           >
             Concede
           </button>
+          {pendingSpellTargeting && (
+            <button
+              type="button"
+              className="prompt-button secondary"
+              onClick={cancelSpellTargeting}
+            >
+              Cancel Spell
+            </button>
+          )}
+          {playerChainReactionPrompt && (
+            <button
+              type="button"
+              className="prompt-button chain-pass-button"
+              onClick={handleChainReactionPass}
+              disabled={respondingToChain}
+            >
+              {respondingToChain ? 'Passing…' : '⚔️ Pass on Chain'}
+            </button>
+          )}
         </>
       )
       : null;
@@ -6073,14 +6864,30 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                       <div className="battlefield-stage__unit-lane battlefield-stage__unit-lane--opponent">
                         {flattenedCreatures
                           .filter((entry) => entry.ownerSlot === 'opponent')
-                          .map((entry) => (
-                            <div
-                              key={`${field.battlefieldId}-${cardIdValue(entry.card)}-opponent`}
-                              className="battlefield-stage__unit"
-                            >
-                              <CardTile card={entry.card} compact onHover={handleCardHover} />
-                            </div>
-                          ))}
+                          .map((entry) => {
+                            const isTarget = isValidSpellTarget(entry.card);
+                            const isTargetSelected = isSpellTargetSelected(entry.card);
+                            const unitClasses = [
+                              'battlefield-stage__unit',
+                              isTarget ? 'battlefield-stage__unit--spell-target' : '',
+                              isTargetSelected ? 'battlefield-stage__unit--target-selected' : '',
+                            ].filter(Boolean).join(' ');
+                            return (
+                              <div
+                                key={`${field.battlefieldId}-${cardIdValue(entry.card)}-opponent`}
+                                className={unitClasses}
+                              >
+                                <CardTile
+                                  card={entry.card}
+                                  compact
+                                  onHover={handleCardHover}
+                                  selectable={isTarget}
+                                  isSelected={isTargetSelected}
+                                  onClick={isTarget ? () => handleSpellTargetClick(entry.card) : undefined}
+                                />
+                              </div>
+                            );
+                          })}
                       </div>
                       <div className="battlefield-stage__unit-lane battlefield-stage__unit-lane--self">
                         {flattenedCreatures
@@ -6098,27 +6905,39 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                             const canDragUnit = Boolean(
                               canAct && instanceId && canMobilizeUnit(entry.card)
                             );
+                            const isTarget = isValidSpellTarget(entry.card);
+                            const isTargetSelected = isSpellTargetSelected(entry.card);
+                            const unitClasses = [
+                              'battlefield-stage__unit',
+                              'battlefield-stage__unit--self',
+                              isTarget ? 'battlefield-stage__unit--spell-target' : '',
+                              isTargetSelected ? 'battlefield-stage__unit--target-selected' : '',
+                            ].filter(Boolean).join(' ');
+                            // If targeting a spell, prioritize that click handler
+                            const handleClick = isTarget
+                              ? () => handleSpellTargetClick(entry.card)
+                              : canAct
+                                ? () => handleSelectUnit(entry.card)
+                                : undefined;
                             return (
                               <div
                                 key={`${field.battlefieldId}-${cardKey}-self`}
-                                className="battlefield-stage__unit battlefield-stage__unit--self"
+                                className={unitClasses}
                               >
                                 <CardTile
                                   card={displayCard}
                                   compact
-                                  selectable={canAct}
-                                  isSelected={isSelected}
-                                  onClick={
-                                    canAct ? () => handleSelectUnit(entry.card) : undefined
-                                  }
-                                  draggable={canDragUnit}
+                                  selectable={canAct || isTarget}
+                                  isSelected={isSelected || isTargetSelected}
+                                  onClick={handleClick}
+                                  draggable={canDragUnit && !isTarget}
                                   onDragStart={
-                                    canDragUnit
+                                    canDragUnit && !isTarget
                                       ? (event) => handleUnitDragStart(entry.card, event)
                                       : undefined
                                   }
                                   onDragEnd={
-                                    canDragUnit
+                                    canDragUnit && !isTarget
                                       ? (event) => handleUnitDragEnd(entry.card, event)
                                       : undefined
                                   }
@@ -6213,6 +7032,42 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       </div>
     ) : null;
 
+  // Spell targeting banner - shows when selecting targets for a spell
+  const spellTargetingBanner =
+    pendingSpellTargeting && pendingSpellCard && !showInitiativeScreen && !showBattlefieldScreen ? (
+      <div className="spell-targeting-banner" role="status">
+        <div className="spell-targeting-banner__info">
+          <span>Casting</span>
+          <strong>{pendingSpellCard.name ?? 'Spell'}</strong>
+          <div className="spell-targeting-banner__details">
+            <span>
+              Selected: {spellTargetSelection.length}{spellTargetMax ? ` / ${spellTargetMax}` : ''}
+            </span>
+          </div>
+        </div>
+        <div className="spell-targeting-banner__actions">
+          {canConfirmSpellTarget ? (
+            <button
+              type="button"
+              className="prompt-button primary"
+              onClick={confirmSpellWithTargets}
+              disabled={playingCard}
+            >
+              {playingCard ? 'Casting…' : 'Cast Spell'}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="prompt-button secondary"
+            onClick={cancelSpellTargeting}
+            disabled={playingCard}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    ) : null;
+
   const matchInfoPanel = (
     <div className="match-info-panel">
       <div>
@@ -6269,11 +7124,15 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const combatPrioritySticky = combatPriorityBanner ? (
     <div className="combat-priority-sticky">{combatPriorityBanner}</div>
   ) : null;
+  const spellTargetingSticky = spellTargetingBanner ? (
+    <div className="spell-targeting-sticky">{spellTargetingBanner}</div>
+  ) : null;
   const matchStatusHeader = (
     <div className="match-status-frame">
       <div className="match-status-sticky">
         {matchStatusCluster}
         {combatPrioritySticky}
+        {spellTargetingSticky}
       </div>
       {opponentHandBanner ? (
         <div className="match-status-hand">{opponentHandBanner}</div>
@@ -6545,6 +7404,68 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           )
         : null;
 
+  const accelerateOverlay =
+    pendingAccelerate && pendingAccelerateCard ? (
+      <div className="deploy-overlay">
+        <div className="deploy-modal">
+          <h4>Accelerate</h4>
+          <p>
+            <strong>{pendingAccelerateCard.name ?? 'This unit'}</strong> has{' '}
+            <em>Accelerate</em>.
+          </p>
+          <p>
+            Pay <strong>{describeAccelerateCost(pendingAccelerate.hint)}</strong> to
+            have it enter ready (able to move/act this turn)?
+          </p>
+          <div className="deploy-options">
+            <button
+              type="button"
+              className="prompt-button primary"
+              onClick={() => {
+                void handlePlayCard(
+                  pendingAccelerate.cardIndex,
+                  pendingAccelerate.destinationId,
+                  {
+                    animateKey: pendingAccelerate.animateKey,
+                    skipAcceleratePrompt: true,
+                    useAccelerate: true,
+                  }
+                );
+                setPendingAccelerate(null);
+              }}
+            >
+              Yes, Accelerate
+            </button>
+            <button
+              type="button"
+              className="prompt-button secondary"
+              onClick={() => {
+                void handlePlayCard(
+                  pendingAccelerate.cardIndex,
+                  pendingAccelerate.destinationId,
+                  {
+                    animateKey: pendingAccelerate.animateKey,
+                    skipAcceleratePrompt: true,
+                    useAccelerate: false,
+                  }
+                );
+                setPendingAccelerate(null);
+              }}
+            >
+              No, Enter Exhausted
+            </button>
+          </div>
+          <button
+            type="button"
+            className="prompt-button danger"
+            onClick={() => setPendingAccelerate(null)}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    ) : null;
+
   const duelLogSidebar = (
     <aside className="arena-log-panel">
       <div className="duel-log">
@@ -6694,35 +7615,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         </div>
         {duelLogSidebar}
       </div>
-      {selectedUnitCard && (
-        <section className="selection-banner">
-          <div>
-            Selected Unit:{' '}
-            <strong>{selectedUnitCard.name ?? selectedUnitCard.cardId}</strong>
-          </div>
-          <div className="selection-actions">
-            <button
-              className="prompt-button"
-              onClick={() => setSelectedUnit(null)}
-            >
-              Clear
-            </button>
-            <button
-              className="prompt-button primary"
-              onClick={() => handleMoveSelected('base')}
-              disabled={
-                !canMoveSelectedToBase ||
-                movingUnit ||
-                !canAct ||
-                matchStatus !== 'IN_PROGRESS'
-              }
-            >
-              {movingUnit ? 'Moving...' : 'Return to Base'}
-            </button>
-      </div>
-    </section>
-  )}
       {deploymentOverlay}
+      {accelerateOverlay}
       {graveyardModal}
     </>
   );
@@ -6789,6 +7683,29 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           canConfirm={canConfirmTarget}
           onToggle={toggleTargetSelection}
           onConfirm={handleConfirmTargetSelection}
+        />
+      )}
+      {showSpellReactionModal && (
+        <SpellReactionModal
+          spell={pendingSpell?.spell ?? null}
+          casterName={
+            pendingSpell?.casterId === playerId
+              ? selfHeading
+              : opponentHeading
+          }
+          targetDescriptions={pendingSpell?.targetDescriptions ?? []}
+          waitingMessage={spellReactionWaitingMessage}
+          loading={respondingToSpell}
+          onPass={handleSpellReactionPass}
+        />
+      )}
+      {showChainReactionModal && reactionChain && (
+        <ChainReactionBanner
+          chain={reactionChain}
+          playerId={playerId}
+          resolvePlayerName={resolvePlayerLabel}
+          isWaiting={Boolean(chainReactionWaitingMessage)}
+          opponentName={opponentHeading}
         />
       )}
       {showConcedeConfirm && (
