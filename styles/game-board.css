@@ -275,6 +275,38 @@
   gap: 12px;
 }
 
+/* Waiting variant - more subdued styling */
+.spell-targeting-banner--waiting {
+  animation: none;
+  background: linear-gradient(135deg, rgba(var(--color-surface-rgb), 0.95) 0%, rgba(var(--color-surface-rgb), 0.9) 100%);
+  border-color: rgba(var(--color-surface-contrast-rgb), 0.2);
+}
+
+.spell-targeting-banner--waiting .spell-targeting-banner__info {
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+}
+
+.spell-targeting-banner--waiting .spell-targeting-banner__info span {
+  font-size: 14px;
+  text-transform: none;
+  letter-spacing: normal;
+  color: rgba(var(--color-surface-contrast-rgb), 0.75);
+}
+
+.spell-targeting-banner--waiting .spell-targeting-banner__info strong {
+  font-size: 14px;
+  margin-top: 0;
+  color: var(--color-primary);
+}
+
+.spell-targeting-banner--waiting .phase-spinner {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
 /* Spell target highlighting on battlefield units - prominent shining effect */
 .battlefield-stage__unit--spell-target {
   position: relative;
@@ -407,6 +439,73 @@
   animation: none;
   filter: brightness(1.3) drop-shadow(0 0 15px rgba(0, 255, 136, 0.6));
   transform: scale(1.05);
+}
+
+/* Chain target highlighting - shows units that are targets of spells/abilities on the chain */
+.battlefield-stage__unit--chain-target .card-tile::before {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border: 3px solid rgba(220, 38, 127, 0.9);
+  border-radius: 14px;
+  z-index: 1;
+  pointer-events: none;
+  box-shadow: 
+    0 0 15px rgba(220, 38, 127, 0.6),
+    0 0 30px rgba(220, 38, 127, 0.3),
+    inset 0 0 10px rgba(220, 38, 127, 0.2);
+  background: linear-gradient(
+    135deg,
+    rgba(220, 38, 127, 0.15) 0%,
+    rgba(220, 38, 127, 0.05) 50%,
+    rgba(220, 38, 127, 0.15) 100%
+  );
+  animation: chain-target-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes chain-target-pulse {
+  0%, 100% {
+    box-shadow: 
+      0 0 15px rgba(220, 38, 127, 0.6),
+      0 0 30px rgba(220, 38, 127, 0.3),
+      inset 0 0 10px rgba(220, 38, 127, 0.2);
+  }
+  50% {
+    box-shadow: 
+      0 0 25px rgba(220, 38, 127, 0.8),
+      0 0 50px rgba(220, 38, 127, 0.5),
+      inset 0 0 15px rgba(220, 38, 127, 0.3);
+  }
+}
+
+.battlefield-stage__unit--chain-target .card-tile::after {
+  content: 'TARGETED';
+  position: absolute;
+  bottom: -24px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 3px 8px;
+  background: rgba(220, 38, 127, 0.9);
+  color: #fff;
+  border-radius: 4px;
+  z-index: 10;
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  white-space: nowrap;
+}
+
+.battlefield-stage__unit--chain-target .card-tile--tapped::after {
+  transform: translateX(-50%) rotate(90deg);
+  bottom: auto;
+  top: 50%;
+  left: calc(100% + 20px);
+}
+
+.battlefield-stage__unit--chain-target {
+  filter: brightness(1.1) drop-shadow(0 0 10px rgba(220, 38, 127, 0.5));
 }
 
 .arena-sidebar {
@@ -1164,6 +1263,149 @@
   align-items: center;
   width: 100%;
   align-self: center;
+  gap: 12px;
+}
+
+/* Staged Spells Stack - shows spell cards on the reaction chain */
+.staged-spells-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  max-width: 700px;
+  padding: 10px 16px;
+  background: linear-gradient(
+    135deg,
+    rgba(139, 92, 246, 0.15) 0%,
+    rgba(168, 85, 247, 0.08) 100%
+  );
+  border: 1px solid rgba(139, 92, 246, 0.4);
+  border-radius: 14px;
+  box-shadow: 0 4px 20px rgba(139, 92, 246, 0.2);
+}
+
+.staged-spells-stack__label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: rgba(168, 85, 247, 0.9);
+  margin-bottom: 8px;
+}
+
+.staged-spells-stack__cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+}
+
+.staged-spell-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: rgba(var(--color-panel-rgb), 0.85);
+  border: 2px solid rgba(139, 92, 246, 0.5);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  position: relative;
+}
+
+.staged-spell-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(139, 92, 246, 0.3);
+}
+
+.staged-spell-card--own {
+  border-color: rgba(59, 130, 246, 0.6);
+  background: linear-gradient(
+    135deg,
+    rgba(59, 130, 246, 0.12) 0%,
+    rgba(var(--color-panel-rgb), 0.85) 100%
+  );
+}
+
+.staged-spell-card--opponent {
+  border-color: rgba(239, 68, 68, 0.6);
+  background: linear-gradient(
+    135deg,
+    rgba(239, 68, 68, 0.12) 0%,
+    rgba(var(--color-panel-rgb), 0.85) 100%
+  );
+}
+
+.staged-spell-card__chain-number {
+  position: absolute;
+  top: -8px;
+  left: -8px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(139, 92, 246, 0.9);
+  border-radius: 50%;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+.staged-spell-card--own .staged-spell-card__chain-number {
+  background: rgba(59, 130, 246, 0.9);
+}
+
+.staged-spell-card--opponent .staged-spell-card__chain-number {
+  background: rgba(239, 68, 68, 0.9);
+}
+
+.staged-spell-card__image {
+  width: 50px;
+  height: 70px;
+  border-radius: 6px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.staged-spell-card__image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.staged-spell-card__info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 80px;
+}
+
+.staged-spell-card__name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text);
+  line-height: 1.2;
+}
+
+.staged-spell-card__caster {
+  font-size: 0.7rem;
+  color: rgba(var(--color-text-muted-rgb), 0.8);
+}
+
+.staged-spell-card__targets {
+  font-size: 0.7rem;
+  font-style: italic;
+  color: rgba(168, 85, 247, 0.85);
+}
+
+.staged-spell-card--own .staged-spell-card__targets {
+  color: rgba(59, 130, 246, 0.85);
+}
+
+.staged-spell-card--opponent .staged-spell-card__targets {
+  color: rgba(239, 68, 68, 0.85);
 }
 
 .battlefield-stage {
@@ -1338,6 +1580,237 @@
 
 .battlefield-stage__unit-lane--self {
   align-items: flex-end;
+}
+
+/* Battlefield Card Wrapper - contains hidden slot + battlefield */
+.battlefield-stage__card-wrapper {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+/* Hidden Card Slot - positioned to the left of each battlefield */
+.battlefield-stage__hidden-slot {
+  width: 72px;
+  min-height: 140px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.battlefield-stage__hidden-slot--controlled {
+  /* Slight visual indication that this slot can accept a hidden card */
+}
+
+/* When dragging a card with Hidden mechanic over the slot */
+.battlefield-stage__hidden-slot--drop-target {
+  position: relative;
+}
+
+.battlefield-stage__hidden-slot--drop-target .battlefield-stage__hidden-card--empty {
+  border-color: rgba(100, 180, 255, 0.7);
+  background: rgba(60, 100, 160, 0.35);
+  opacity: 1;
+}
+
+.battlefield-stage__hidden-slot--drag-hover {
+  transform: scale(1.05);
+}
+
+.battlefield-stage__hidden-slot--drag-hover .battlefield-stage__hidden-card--empty {
+  border-color: rgba(100, 220, 255, 0.9);
+  border-style: solid;
+  background: rgba(80, 140, 200, 0.5);
+  box-shadow: 0 0 16px rgba(100, 180, 255, 0.5);
+}
+
+/* Hidden Card (in slot) */
+.battlefield-stage__hidden-card {
+  width: 68px;
+  min-height: 100px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.battlefield-stage__hidden-card-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px 4px;
+  text-align: center;
+  width: 100%;
+  height: 100%;
+}
+
+/* Empty slot style */
+.battlefield-stage__hidden-card--empty {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px dashed rgba(var(--color-border-rgb), 0.35);
+  opacity: 0.6;
+}
+
+.battlefield-stage__hidden-card--empty .battlefield-stage__hidden-card-icon-empty {
+  font-size: 20px;
+  color: rgba(var(--color-text-primary-rgb), 0.25);
+}
+
+.battlefield-stage__hidden-card--empty .battlefield-stage__hidden-card-label {
+  font-size: 8px;
+  color: rgba(var(--color-text-primary-rgb), 0.35);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* Owned hidden card (face up to owner) */
+.battlefield-stage__hidden-card--owned {
+  background: linear-gradient(135deg, rgba(60, 100, 140, 0.85), rgba(40, 70, 100, 0.9));
+  border: 2px solid rgba(100, 180, 255, 0.5);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.battlefield-stage__hidden-card--owned .battlefield-stage__hidden-card-icon {
+  font-size: 18px;
+}
+
+.battlefield-stage__hidden-card--owned .battlefield-stage__hidden-card-name {
+  font-size: 9px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.95);
+  max-width: 60px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.2;
+}
+
+.battlefield-stage__hidden-card--owned .battlefield-stage__hidden-card-wait {
+  font-size: 8px;
+  color: rgba(255, 200, 100, 0.9);
+  font-style: italic;
+}
+
+/* Activatable hidden card - golden glow animation */
+.battlefield-stage__hidden-card--activatable {
+  border-color: rgba(255, 215, 0, 0.9);
+  box-shadow:
+    0 0 8px rgba(255, 215, 0, 0.5),
+    0 0 16px rgba(255, 200, 50, 0.3),
+    0 4px 12px rgba(0, 0, 0, 0.4);
+  animation: hiddenCardGlow 2s ease-in-out infinite;
+}
+
+.battlefield-stage__hidden-card--activatable::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 12px;
+  background: linear-gradient(
+    45deg,
+    transparent 30%,
+    rgba(255, 215, 0, 0.4) 50%,
+    transparent 70%
+  );
+  animation: hiddenCardShine 3s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes hiddenCardGlow {
+  0%, 100% {
+    box-shadow:
+      0 0 8px rgba(255, 215, 0, 0.5),
+      0 0 16px rgba(255, 200, 50, 0.3),
+      0 4px 12px rgba(0, 0, 0, 0.4);
+    border-color: rgba(255, 215, 0, 0.9);
+  }
+  50% {
+    box-shadow:
+      0 0 14px rgba(255, 215, 0, 0.7),
+      0 0 28px rgba(255, 200, 50, 0.5),
+      0 4px 16px rgba(0, 0, 0, 0.5);
+    border-color: rgba(255, 230, 100, 1);
+  }
+}
+
+@keyframes hiddenCardShine {
+  0% {
+    transform: translateX(-150%) rotate(45deg);
+  }
+  100% {
+    transform: translateX(150%) rotate(45deg);
+  }
+}
+
+/* Reveal button for activatable hidden cards */
+.battlefield-stage__hidden-reveal-btn {
+  background: linear-gradient(135deg, rgba(255, 200, 50, 0.9), rgba(220, 170, 30, 0.95));
+  border: none;
+  border-radius: 4px;
+  color: #1a1a1a;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 4px 8px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+.battlefield-stage__hidden-reveal-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(255, 220, 80, 1), rgba(240, 190, 50, 1));
+  transform: translateY(-1px);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.4);
+}
+
+.battlefield-stage__hidden-reveal-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.battlefield-stage__hidden-reveal-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Enemy hidden card (face down) */
+.battlefield-stage__hidden-card--enemy {
+  background: linear-gradient(135deg, rgba(100, 40, 40, 0.85), rgba(80, 30, 30, 0.9));
+  border: 2px solid rgba(255, 80, 80, 0.5);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.battlefield-stage__hidden-card--enemy .battlefield-stage__hidden-card-icon {
+  font-size: 22px;
+  color: rgba(255, 100, 100, 0.9);
+}
+
+.battlefield-stage__hidden-card--enemy .battlefield-stage__hidden-card-label {
+  font-size: 8px;
+  color: rgba(255, 150, 150, 0.8);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Ready but waiting state - subtle glow, no animation */
+.battlefield-stage__hidden-card--ready {
+  border-color: rgba(100, 200, 150, 0.7);
+  box-shadow:
+    0 0 6px rgba(100, 200, 150, 0.3),
+    0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.battlefield-stage__hidden-card-ready-text {
+  font-size: 8px;
+  color: rgba(100, 200, 150, 0.95);
+  font-weight: 600;
 }
 
 .battlefield-stage__unit {

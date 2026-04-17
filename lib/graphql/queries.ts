@@ -693,6 +693,94 @@ export const MOVE_UNIT = gql`
   }
 `;
 
+export const HIDE_CARD = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
+  ${CARD_SNAPSHOT_FIELDS}
+  ${BATTLEFIELD_STATE_FIELDS}
+  ${GAME_PROMPT_FIELDS}
+  ${PRIORITY_WINDOW_FIELDS}
+  mutation HideCard(
+    $matchId: ID!
+    $playerId: ID!
+    $cardIndex: Int!
+    $battlefieldId: ID!
+  ) {
+    hideCard(
+      matchId: $matchId
+      playerId: $playerId
+      cardIndex: $cardIndex
+      battlefieldId: $battlefieldId
+    ) {
+      success
+      gameState {
+        matchId
+        players {
+          ...PlayerStateFields
+        }
+        battlefields {
+          ...BattlefieldStateFields
+        }
+        currentPhase
+        turnNumber
+        prompts {
+          ...GamePromptFields
+        }
+        priorityWindow {
+          ...PriorityWindowFields
+        }
+      }
+      currentPhase
+    }
+  }
+`;
+
+export const ACTIVATE_HIDDEN_CARD = gql`
+  ${CARD_STATE_FIELDS}
+  ${PLAYER_STATE_FIELDS}
+  ${CARD_SNAPSHOT_FIELDS}
+  ${BATTLEFIELD_STATE_FIELDS}
+  ${GAME_PROMPT_FIELDS}
+  ${PRIORITY_WINDOW_FIELDS}
+  ${REACTION_CHAIN_FIELDS}
+  mutation ActivateHiddenCard(
+    $matchId: ID!
+    $playerId: ID!
+    $hiddenInstanceId: ID!
+    $targets: [String!]
+  ) {
+    activateHiddenCard(
+      matchId: $matchId
+      playerId: $playerId
+      hiddenInstanceId: $hiddenInstanceId
+      targets: $targets
+    ) {
+      success
+      gameState {
+        matchId
+        players {
+          ...PlayerStateFields
+        }
+        battlefields {
+          ...BattlefieldStateFields
+        }
+        currentPhase
+        turnNumber
+        prompts {
+          ...GamePromptFields
+        }
+        priorityWindow {
+          ...PriorityWindowFields
+        }
+        reactionChain {
+          ...ReactionChainFields
+        }
+      }
+      currentPhase
+    }
+  }
+`;
+
 export const ACTIVATE_CHAMPION_POWER = gql`
   ${CARD_STATE_FIELDS}
   ${PLAYER_STATE_FIELDS}

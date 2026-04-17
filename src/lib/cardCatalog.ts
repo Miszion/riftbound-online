@@ -13,7 +13,7 @@ export interface RuleClause {
   tags: string[];
 }
 
-export type ActivationTiming = 'action' | 'reaction' | 'triggered' | 'passive';
+export type ActivationTiming = 'action' | 'reaction' | 'triggered' | 'passive' | 'main';
 
 export interface ActivationProfile {
   timing: ActivationTiming;
@@ -209,10 +209,11 @@ const deriveReactionWindows = (effect: string): string[] => {
 };
 
 const deriveTiming = (effect: string): ActivationTiming => {
-  if (/^ACTION\b/i.test(effect) || /\bACTION\b/i.test(effect)) return 'action';
-  if (/^REACTION\b/i.test(effect) || /\bREACTION\b/i.test(effect)) return 'reaction';
+  if (/^ACTION\b/i.test(effect) || /\[Action\]/i.test(effect)) return 'action';
+  if (/^REACTION\b/i.test(effect) || /\[Reaction\]/i.test(effect)) return 'reaction';
   if (/\b(When|Whenever)\b/i.test(effect)) return 'triggered';
-  return 'passive';
+  // Spells without ACTION or REACTION can only be played during main phase
+  return 'main';
 };
 
 const buildActivation = (effect: string): ActivationProfile => {

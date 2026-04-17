@@ -18,6 +18,8 @@ import {
   usePlayerGameStateSubscription,
   usePlayCard,
   useMoveUnit,
+  useHideCard,
+  useActivateHiddenCard,
   useCommenceBattle,
   useNextPhase,
   useConcedeMatch,
@@ -606,6 +608,15 @@ type BattlefieldPresence = {
   unitCount: number;
 };
 
+type HiddenCardState = {
+  instanceId: string;
+  ownerId: string;
+  hiddenOnTurn: number;
+  battlefieldId: string;
+  card?: BaseCard | null;
+  isRevealed: boolean;
+};
+
 type BattlefieldState = {
   battlefieldId: string;
   slug?: string | null;
@@ -621,6 +632,7 @@ type BattlefieldState = {
   effectState?: Record<string, unknown> | null;
   card?: CardSnapshotLike | BaseCard | null;
   presence?: BattlefieldPresence[] | null;
+  hiddenCards?: HiddenCardState[] | null;
 };
 
 type BattlefieldPromptOption = {
@@ -1026,6 +1038,14 @@ const cardSupportsCombatTiming = (
     return false;
   }
   const normalized = timing === 'reaction' ? 'reaction' : 'action';
+  
+  // Check activationProfile.timing first (most accurate)
+  const activationTiming = (card as { activationProfile?: { timing?: string } })?.activationProfile?.timing?.toLowerCase();
+  if (activationTiming === normalized) {
+    return true;
+  }
+  
+  // Fall back to keyword check
   return (
     card.keywords?.some((entry) => entry?.toLowerCase().includes(normalized)) ??
     cardHasKeyword(card, normalized)
@@ -1171,6 +1191,8 @@ interface CardTileProps {
   onDragEnd?: (event: React.DragEvent<HTMLDivElement>) => void;
   title?: string;
   onHover?: CardHoverHandler;
+  /** Force the card to display upright regardless of its tapped state */
+  forceUntapped?: boolean;
 }
 
 const CardTile: React.FC<CardTileProps> = ({
@@ -1187,13 +1209,14 @@ const CardTile: React.FC<CardTileProps> = ({
   onDragEnd,
   title,
   onHover,
+  forceUntapped,
 }) => {
   const image = getCardImage(card);
   const rarityColor =
     RARITY_COLORS[card?.rarity?.toLowerCase() ?? ''] ?? '#475569';
   const statsAvailable =
     card?.power !== undefined && card?.toughness !== undefined;
-  const isTapped = Boolean(card?.isTapped ?? card?.tapped);
+  const isTapped = forceUntapped ? false : Boolean(card?.isTapped ?? card?.tapped);
   const isTokenCard = isTokenCardEntity(card);
   const hoverOptions = isTapped ? { displayUntapped: true } : undefined;
   const inlineStyle = useMemo<React.CSSProperties>(() => {
@@ -2145,7 +2168,7 @@ const TargetSelectionModal = ({
                     onClick={handleClick}
                     disabled={disabled}
                   >
-                    <CardTile card={card} widthPx={165} selectable={!disabled} isSelected={isSelected} />
+                    <CardTile card={card} widthPx={165} selectable={!disabled} isSelected={isSelected} forceUntapped />
                     <span className="mulligan-card-button__tag">
                       {isSelected ? 'Selected' : 'Target'}
                     </span>
@@ -2475,6 +2498,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const [playCard, { loading: playingCard }] = usePlayCard();
   const [moveUnit, { loading: movingUnit }] = useMoveUnit();
+  const [hideCardMutation, { loading: hidingCard }] = useHideCard();
+  const [activateHiddenCardMutation, { loading: activatingHiddenCard }] = useActivateHiddenCard();
   const [commenceBattleMutation, { loading: commencingBattle }] = useCommenceBattle();
   const [nextPhase, { loading: advancingPhase }] = useNextPhase();
   const [concedeMatch] = useConcedeMatch();
@@ -2544,6 +2569,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const [awaitingConcessionResult, setAwaitingConcessionResult] = useState(false);
   const [draggingUnitId, setDraggingUnitId] = useState<string | null>(null);
   const [dragOverBattlefieldId, setDragOverBattlefieldId] = useState<string | null>(null);
+  const [dragOverHiddenSlotId, setDragOverHiddenSlotId] = useState<string | null>(null);
   const { pushToast } = useToasts();
   const [duelLog, setDuelLog] = useState<DuelLogEntry[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessageEntry[]>([]);
@@ -3434,14 +3460,16 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     : 1;
   const playerTargetPrompt =
     targetPrompts.find((prompt) => prompt.playerId === playerId && !prompt.resolved) ?? null;
-  const opponentTargetPending = useMemo(
+  const opponentTargetPrompt = useMemo(
     () =>
-      Boolean(
-        opponentPlayerId &&
-          targetPrompts.some((prompt) => prompt.playerId === opponentPlayerId && !prompt.resolved)
-      ),
+      opponentPlayerId
+        ? targetPrompts.find((prompt) => prompt.playerId === opponentPlayerId && !prompt.resolved) ?? null
+        : null,
     [opponentPlayerId, targetPrompts]
   );
+  const opponentTargetPending = Boolean(opponentTargetPrompt);
+  const opponentTargetScope = (opponentTargetPrompt?.data?.scope as string | undefined) ?? null;
+  const opponentTargetSourceName = (opponentTargetPrompt?.data?.sourceCardName as string | undefined) ?? null;
 
   // Spell Reaction prompt: shows when opponent casts a spell targeting something
   const playerSpellReactionPrompt =
@@ -3470,6 +3498,41 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   // Get active reaction chain from game state
   const reactionChain = spectatorState?.reactionChain ?? null;
 
+  // Get all targets from the active chain (for highlighting)
+  const chainTargetInstanceIds = useMemo(() => {
+    if (!reactionChain?.items?.length) return new Set<string>();
+    const targets = new Set<string>();
+    reactionChain.items.forEach((item: any) => {
+      (item.targets ?? []).forEach((t: string) => targets.add(t));
+    });
+    return targets;
+  }, [reactionChain]);
+
+  // Helper to check if a card is being targeted by a chain item
+  const isChainTarget = useCallback(
+    (card: BaseCard): boolean => {
+      const instanceId = card.instanceId;
+      if (!instanceId) return false;
+      return chainTargetInstanceIds.has(instanceId);
+    },
+    [chainTargetInstanceIds]
+  );
+
+  // Get staged spells from the chain (for visual display)
+  const stagedSpells = useMemo(() => {
+    if (!reactionChain?.items?.length) return [];
+    return reactionChain.items
+      .filter((item: any) => item.type === 'spell' && item.card)
+      .map((item: any) => ({
+        card: item.card,
+        casterId: item.casterId,
+        targets: item.targets ?? [],
+        targetDescriptions: item.targetDescriptions ?? [],
+        isOwn: item.casterId === playerId,
+        linkNumber: reactionChain.items.indexOf(item) + 1
+      }));
+  }, [reactionChain, playerId]);
+
   const targetScope = (playerTargetPrompt?.data?.scope as string) ?? 'unit';
   const targetSelectionMax = playerTargetPrompt
     ? Math.max(1, Number(playerTargetPrompt.data?.max ?? 1))
@@ -3484,6 +3547,10 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     (playerTargetPrompt?.data?.sourceCardName as string | undefined) ?? null;
   const targetAllowFriendly = playerTargetPrompt?.data?.allowFriendly !== false;
   const targetAllowOpponent = playerTargetPrompt?.data?.allowOpponent !== false;
+  // Use spectatorSelf/spectatorOpponent for target candidates to ensure consistency
+  // with the battlefield view which renders from spectatorPlayers
+  const spectatorSelfCreatures = spectatorSelf?.board?.creatures ?? [];
+  const spectatorOpponentCreatures = spectatorOpponent?.board?.creatures ?? [];
   const targetCandidates = useMemo(() => {
     if (!playerTargetPrompt) {
       return [];
@@ -3492,8 +3559,9 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       return playerGraveyard;
     }
     if (targetScope === 'unit') {
-      const friendly = targetAllowFriendly ? playerCreatures : [];
-      const enemy = targetAllowOpponent ? opponentCreatures : [];
+      // Use spectator data to match what's displayed on the battlefield
+      const friendly = targetAllowFriendly ? spectatorSelfCreatures : [];
+      const enemy = targetAllowOpponent ? spectatorOpponentCreatures : [];
       return [...friendly, ...enemy];
     }
     if (targetScope === 'battlefield') {
@@ -3509,8 +3577,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     }
     return [];
   }, [
-    opponentCreatures,
-    playerCreatures,
+    spectatorSelfCreatures,
+    spectatorOpponentCreatures,
     playerGraveyard,
     playerTargetPrompt,
     spectatorState?.battlefields,
@@ -3555,23 +3623,27 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     }
     const scope = spellTargetScope;
     
+    // Use spectator data for consistency with battlefield rendering
+    const selfCreatures = spectatorSelfCreatures;
+    const enemyCreatures = spectatorOpponentCreatures;
+    
     switch (scope) {
       case 'ally_unit':
-        return playerCreatures;
+        return selfCreatures;
       case 'enemy_unit':
-        return opponentCreatures;
+        return enemyCreatures;
       case 'any_unit':
       case 'unit': {
-        const friendly = spellTargetAllowFriendly ? playerCreatures : [];
-        const enemy = spellTargetAllowEnemy ? opponentCreatures : [];
+        const friendly = spellTargetAllowFriendly ? selfCreatures : [];
+        const enemy = spellTargetAllowEnemy ? enemyCreatures : [];
         return [...friendly, ...enemy];
       }
       case 'ally_units':
-        return playerCreatures;
+        return selfCreatures;
       case 'enemy_units':
-        return opponentCreatures;
+        return enemyCreatures;
       case 'all_units':
-        return [...playerCreatures, ...opponentCreatures];
+        return [...selfCreatures, ...enemyCreatures];
       case 'battlefield':
         return (spectatorState?.battlefields ?? []).map((bf: any) => ({
           cardId: bf.battlefieldId,
@@ -3597,8 +3669,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     spellTargetScope,
     spellTargetAllowFriendly,
     spellTargetAllowEnemy,
-    playerCreatures,
-    opponentCreatures,
+    spectatorSelfCreatures,
+    spectatorOpponentCreatures,
     playerGraveyard,
     spectatorState?.battlefields,
     playerId,
@@ -3704,6 +3776,27 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       return spellTargetSelection.includes(instanceId);
     },
     [spellTargetSelection]
+  );
+
+  // Helper to check if a card is a valid target for the current target prompt (unit scope)
+  const isValidPromptTarget = useCallback(
+    (card: BaseCard): boolean => {
+      if (!playerTargetPrompt || targetScope !== 'unit') return false;
+      const instanceId = card.instanceId;
+      if (!instanceId) return false;
+      return targetCandidates.some((c: BaseCard) => c.instanceId === instanceId);
+    },
+    [playerTargetPrompt, targetScope, targetCandidates]
+  );
+
+  // Helper to check if a card is selected as a target prompt target
+  const isPromptTargetSelected = useCallback(
+    (card: BaseCard): boolean => {
+      const instanceId = card.instanceId;
+      if (!instanceId) return false;
+      return targetSelection.includes(instanceId);
+    },
+    [targetSelection]
   );
 
   const opponentCoinFlipPrompt = useMemo(() => {
@@ -4070,6 +4163,70 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       setPendingLeaderDeployment(false);
     }
   }, [pendingLeaderDeployment, playerLeaderReady]);
+
+  const handleHideCard = useCallback(
+    async (cardIndex: number, battlefieldId: string) => {
+      if (!canPlayCards) {
+        notify('You cannot hide cards right now.', 'info', { banner: true });
+        return;
+      }
+      const card = currentPlayer.hand[cardIndex];
+      if (!card) {
+        notify('Card not found.', 'error', { banner: true });
+        return;
+      }
+      if (!cardHasMechanic(card, 'Hidden')) {
+        notify('Only cards with [Hidden] can be hidden.', 'warning', { banner: true });
+        return;
+      }
+      try {
+        await hideCardMutation({
+          variables: {
+            matchId,
+            playerId,
+            cardIndex,
+            battlefieldId
+          }
+        });
+        notify(`${card.name ?? 'Card'} hidden on battlefield.`, 'success', { banner: true });
+        await refreshArenaState();
+      } catch (error) {
+        console.error('Failed to hide card', error);
+        const fallbackMessage =
+          error instanceof Error && error.message
+            ? error.message
+            : 'Unable to hide card.';
+        notify(fallbackMessage, 'error', { banner: true });
+      }
+    },
+    [canPlayCards, currentPlayer.hand, hideCardMutation, matchId, playerId, notify, refreshArenaState]
+  );
+
+  const handleActivateHiddenCard = useCallback(
+    async (hiddenInstanceId: string, targets?: string[]) => {
+      try {
+        await activateHiddenCardMutation({
+          variables: {
+            matchId,
+            playerId,
+            hiddenInstanceId,
+            targets: targets ?? []
+          }
+        });
+        notify('Hidden card revealed!', 'success', { banner: true });
+        await refreshArenaState();
+      } catch (error) {
+        console.error('Failed to activate hidden card', error);
+        const fallbackMessage =
+          error instanceof Error && error.message
+            ? error.message
+            : 'Unable to activate hidden card.';
+        notify(fallbackMessage, 'error', { banner: true });
+      }
+    },
+    [activateHiddenCardMutation, matchId, playerId, notify, refreshArenaState]
+  );
+
   const hasAdvancePhasePrompt = Boolean(playerDiscardPrompt || playerTargetPrompt);
   const canAdvancePhase =
     canAct && rawStatus === 'in_progress' && !hasAdvancePhasePrompt && !isCombatPromptActive;
@@ -4627,6 +4784,86 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     ]
   );
 
+  /**
+   * Check if a hand card can be hidden to a specific battlefield's hidden slot.
+   * Only cards that explicitly say "Hide now for" can be played as hidden.
+   * Cards that just reference [Hidden] (like Ava Achiever) cannot be hidden themselves.
+   */
+  const canHideCardToBattlefield = useCallback(
+    (card: BaseCard | null, battlefieldId: string): boolean => {
+      if (!card) return false;
+      // Card must have "Hide now for" in its effect text - this indicates it can be played hidden
+      // Just having [Hidden] referenced (like "play a card with [Hidden]") doesn't count
+      const effectText = card.effect || '';
+      if (!/hide now for/i.test(effectText)) return false;
+      
+      const battlefield = battlefields.find((f) => f.battlefieldId === battlefieldId);
+      if (!battlefield) return false;
+      
+      // Can only hide to a battlefield you control
+      if (battlefield.controller !== playerId) return false;
+      
+      // Check if hidden slot is already occupied
+      const hiddenCard = battlefield.hiddenCards?.find(hc => hc.ownerId === playerId);
+      if (hiddenCard) return false;
+      
+      return true;
+    },
+    [battlefields, playerId]
+  );
+
+  const handleHiddenSlotDragOver = useCallback(
+    (battlefieldId: string, event: React.DragEvent<HTMLDivElement>) => {
+      if (draggingHandIndex === null) return;
+      
+      const card = currentPlayer.hand[draggingHandIndex] ?? null;
+      if (canHideCardToBattlefield(card, battlefieldId)) {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+        setDragOverHiddenSlotId((prev) => (prev === battlefieldId ? prev : battlefieldId));
+      }
+    },
+    [canHideCardToBattlefield, currentPlayer.hand, draggingHandIndex]
+  );
+
+  const handleHiddenSlotDragLeave = useCallback(
+    (battlefieldId: string, event: React.DragEvent<HTMLDivElement>) => {
+      if (draggingHandIndex === null) return;
+      
+      const nextTarget = event.relatedTarget as Node | null;
+      if (nextTarget && event.currentTarget.contains(nextTarget)) {
+        return;
+      }
+      setDragOverHiddenSlotId((prev) => (prev === battlefieldId ? null : prev));
+    },
+    [draggingHandIndex]
+  );
+
+  const handleHiddenSlotDrop = useCallback(
+    (battlefieldId: string, event: React.DragEvent<HTMLDivElement>) => {
+      if (draggingHandIndex === null) {
+        setDragOverHiddenSlotId(null);
+        return;
+      }
+      
+      const card = currentPlayer.hand[draggingHandIndex] ?? null;
+      if (!canHideCardToBattlefield(card, battlefieldId)) {
+        setDragOverHiddenSlotId(null);
+        return;
+      }
+      
+      event.preventDefault();
+      const index = draggingHandIndex;
+      setDraggingHandIndex(null);
+      setDraggingCardKey(null);
+      setDragOverHiddenSlotId(null);
+      setBoardDragHover(false);
+      
+      void handleHideCard(index, battlefieldId);
+    },
+    [canHideCardToBattlefield, currentPlayer.hand, draggingHandIndex, handleHideCard]
+  );
+
   const handleInitiativeChoice = useCallback(
     async (choiceValue: number) => {
       if (playerInitiativeLocked || awaitingInitiativeResolution) {
@@ -4669,21 +4906,51 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     },
     [playerRunes]
   );
+  // Check if player is in a reaction window (spell reaction or chain reaction)
+  const isInReactionWindow = Boolean(playerSpellReactionPrompt || playerChainReactionPrompt);
+  
   const playableCardFlags = useMemo(
     () =>
       currentPlayer.hand.map((card) => {
         if (!canPlayCards) {
           return false;
         }
-        return canAffordCard(card);
+        if (!canAffordCard(card)) {
+          return false;
+        }
+        const cardType = (card.type ?? '').toUpperCase();
+        
+        // During a reaction window (responding to opponent's spell), only REACTION cards can be played
+        if (isInReactionWindow) {
+          return cardType === 'SPELL' && cardSupportsCombatTiming(card, 'reaction');
+        }
+        
+        // During combat (showdown), only spells with appropriate timing can be played
+        if (hasCombatPriority && combatStage) {
+          if (cardType !== 'SPELL') {
+            return false; // Only spells during combat
+          }
+          // During action stage: both ACTION and REACTION cards are allowed
+          // During reaction stage: only REACTION cards are allowed
+          if (combatStage === 'action') {
+            return cardSupportsCombatTiming(card, 'action') || cardSupportsCombatTiming(card, 'reaction');
+          }
+          return cardSupportsCombatTiming(card, 'reaction');
+        }
+        
+        // Outside of combat/reaction, all affordable cards can be played
+        return true;
       }),
-    [canAffordCard, canPlayCards, currentPlayer.hand]
+    [canAffordCard, canPlayCards, currentPlayer.hand, hasCombatPriority, combatStage, isInReactionWindow]
   );
   const handFocusStates = useMemo(
     () => {
-      // Highlight REACTION cards when player has spell reaction prompt or chain reaction prompt
+      // Highlight REACTION spell cards when player has spell reaction prompt or chain reaction prompt
       if (playerSpellReactionPrompt || playerChainReactionPrompt) {
-        return currentPlayer.hand.map((card) => {
+        return currentPlayer.hand.map((card, index) => {
+          if (!playableCardFlags[index]) return null; // Not playable (can't afford or other restriction)
+          const cardType = (card.type ?? '').toUpperCase();
+          if (cardType !== 'SPELL') return null; // Only spells during reaction windows
           const isReaction = cardSupportsCombatTiming(card, 'reaction');
           return isReaction ? 'reaction' : null;
         });
@@ -4691,11 +4958,24 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       if (!hasCombatPriority || !combatStage) {
         return currentPlayer.hand.map(() => null);
       }
-      return currentPlayer.hand.map((card) =>
-        cardSupportsCombatTiming(card, combatStage) ? combatStage : null
-      );
+      // During combat (showdown), highlight spells with appropriate timing
+      return currentPlayer.hand.map((card, index) => {
+        if (!playableCardFlags[index]) return null; // Not playable
+        const cardType = (card.type ?? '').toUpperCase();
+        if (cardType !== 'SPELL') return null; // Only spells during combat
+        // During action stage, highlight both action and reaction cards
+        const isAction = cardSupportsCombatTiming(card, 'action');
+        const isReaction = cardSupportsCombatTiming(card, 'reaction');
+        if (combatStage === 'action') {
+          if (isAction) return 'action';
+          if (isReaction) return 'reaction';
+          return null;
+        }
+        // During reaction stage, only highlight reaction cards
+        return isReaction ? 'reaction' : null;
+      });
     },
-    [combatStage, currentPlayer.hand, hasCombatPriority, playerChainReactionPrompt, playerSpellReactionPrompt]
+    [combatStage, currentPlayer.hand, hasCombatPriority, playerChainReactionPrompt, playerSpellReactionPrompt, playableCardFlags]
   );
 
   const toggleMulliganSelection = (index: number) => {
@@ -4832,8 +5112,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         ? spellTargetSelection.length + 1 
         : spellTargetSelection.length - 1;
       
-      if (willBeSelected && spellTargetMax === 1 && newCount === 1) {
-        // For single-target spells, immediately cast when target is selected
+      // Auto-confirm when max targets reached (for any spell with a max limit)
+      if (willBeSelected && spellTargetMax > 0 && newCount === spellTargetMax) {
         setTimeout(() => {
           confirmSpellWithTargets();
         }, 100);
@@ -4857,15 +5137,36 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       return;
     }
     if (!playableCardFlags[index]) {
-      notify('Insufficient runes to play this card.', 'warning', { banner: true });
+      // Determine why the card can't be played for a more helpful message
+      const cardType = (card.type ?? '').toUpperCase();
+      if (isInReactionWindow) {
+        if (cardType !== 'SPELL' || !cardSupportsCombatTiming(card, 'reaction')) {
+          notify('Only REACTION spells can be played in response.', 'warning', { banner: true });
+        } else {
+          notify('Insufficient runes to play this card.', 'warning', { banner: true });
+        }
+      } else if (hasCombatPriority && combatStage) {
+        if (cardType !== 'SPELL') {
+          notify('Only spells can be played during a showdown.', 'warning', { banner: true });
+        } else if (combatStage === 'action' && !cardSupportsCombatTiming(card, 'action') && !cardSupportsCombatTiming(card, 'reaction')) {
+          notify('Only ACTION or REACTION spells can be played during a showdown.', 'warning', { banner: true });
+        } else if (combatStage === 'reaction' && !cardSupportsCombatTiming(card, 'reaction')) {
+          notify('Only REACTION spells can be played right now.', 'warning', { banner: true });
+        } else {
+          notify('Insufficient runes to play this card.', 'warning', { banner: true });
+        }
+      } else {
+        notify('Insufficient runes to play this card.', 'warning', { banner: true });
+      }
       return;
     }
-    const cardType = (card.type ?? '').toUpperCase();
+    const cardTypeFinal = (card.type ?? '').toUpperCase();
     
     // Check if this is a spell that requires targeting
-    if (cardType === 'SPELL') {
+    if (cardTypeFinal === 'SPELL') {
       const targeting = card.spellTargeting;
-      if (targeting?.requiresSelection && (targeting.minTargets ?? 0) > 0) {
+      // Enter targeting mode if spell requires selection (even if minTargets is 0 for "up to X" effects)
+      if (targeting?.requiresSelection && (targeting.maxTargets ?? 0) > 0) {
         // This spell requires targeting - enter targeting mode
         setPendingSpellTargeting({
           cardIndex: index,
@@ -4876,7 +5177,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       }
     }
     
-    if (cardType === 'CREATURE') {
+    if (cardTypeFinal === 'CREATURE') {
       // Check deployment permissions for this card
       const cardPerms = getCardBattlefieldDeploymentPermissions(card);
       const canDeployToOpen = cardPerms.canPlayToOpenBattlefield || hasAllyGrantingOpenBattlefieldDeploy;
@@ -5160,6 +5461,31 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     targetSelection,
     targetSelectionMin
   ]);
+
+  // Handler for clicking a unit when in target prompt mode (unit scope)
+  const handlePromptTargetClick = useCallback(
+    (card: BaseCard) => {
+      if (!playerTargetPrompt || targetScope !== 'unit') return;
+      const instanceId = card.instanceId;
+      if (!instanceId || !isValidPromptTarget(card)) return;
+      
+      toggleTargetSelection(instanceId);
+      
+      // Auto-confirm when exactly the required targets are selected (for single-target effects)
+      const willBeSelected = !targetSelection.includes(instanceId);
+      const newCount = willBeSelected 
+        ? targetSelection.length + 1 
+        : targetSelection.length - 1;
+      
+      // Auto-confirm for single target selection when min and max are both 1
+      if (willBeSelected && targetSelectionMin === 1 && targetSelectionMax === 1 && newCount === 1) {
+        setTimeout(() => {
+          handleConfirmTargetSelection();
+        }, 100);
+      }
+    },
+    [playerTargetPrompt, targetScope, isValidPromptTarget, toggleTargetSelection, targetSelection, targetSelectionMin, targetSelectionMax, handleConfirmTargetSelection]
+  );
 
   const handleSelectBattlefield = async (battlefieldId: string) => {
     if (!battlefieldId) {
@@ -6073,12 +6399,18 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         : targetScope === 'battlefield'
           ? 'Battlefield'
           : 'Target';
+  // For non-unit scope waiting, show a modal. For unit scope, show a banner.
   const targetWaitingMessage =
-    !playerTargetPrompt && opponentTargetPending
+    !playerTargetPrompt && opponentTargetPending && opponentTargetScope !== 'unit'
       ? `Waiting for ${opponentHeading} to choose targets…`
       : null;
+  const unitTargetWaitingMessage =
+    !playerTargetPrompt && opponentTargetPending && opponentTargetScope === 'unit'
+      ? `Waiting for ${opponentHeading} to select a unit…`
+      : null;
+  // Only show target modal for graveyard/battlefield scopes - unit targeting happens inline on the board
   const showTargetModal = Boolean(
-    (playerTargetPrompt || targetWaitingMessage) && !showInitiativeScreen && !showBattlefieldScreen
+    ((playerTargetPrompt && targetScope !== 'unit') || targetWaitingMessage) && !showInitiativeScreen && !showBattlefieldScreen
   );
   
   // Spell targeting modal display
@@ -6732,6 +7064,51 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const shouldHighlightBattlefieldTargets =
     (mobilizationReady || redeployReady) && battlefields.length > 0;
 
+  // Staged spells stack - shows spell cards that are on the reaction chain
+  const stagedSpellsStack = stagedSpells.length > 0 && (
+    <div className="staged-spells-stack">
+      <div className="staged-spells-stack__label">Spell Stack</div>
+      <div className="staged-spells-stack__cards">
+        {stagedSpells.map((staged, idx) => {
+          const spell = staged.card;
+          const spellImage = getCardImage(spell) ?? buildCardArtUrl(spell?.slug ?? null);
+          const casterLabel = staged.isOwn ? 'You' : opponentHeading;
+          // Show target descriptions if available, otherwise show target count
+          const targetDesc = staged.targetDescriptions?.length 
+            ? `→ ${staged.targetDescriptions.join(', ')}`
+            : staged.targets?.length 
+              ? `→ ${staged.targets.length} target${staged.targets.length !== 1 ? 's' : ''}`
+              : '';
+          return (
+            <div 
+              key={`staged-spell-${idx}`}
+              className={[
+                'staged-spell-card',
+                staged.isOwn ? 'staged-spell-card--own' : 'staged-spell-card--opponent'
+              ].filter(Boolean).join(' ')}
+              onMouseEnter={() => handleCardHover?.(spell ?? null)}
+              onMouseLeave={() => handleCardHover?.(null)}
+            >
+              <div className="staged-spell-card__chain-number">#{staged.linkNumber}</div>
+              {spellImage && (
+                <div className="staged-spell-card__image">
+                  <img src={spellImage} alt={spell?.name ?? 'Spell'} draggable={false} />
+                </div>
+              )}
+              <div className="staged-spell-card__info">
+                <div className="staged-spell-card__name">{spell?.name ?? 'Unknown Spell'}</div>
+                <div className="staged-spell-card__caster">{casterLabel}</div>
+                {targetDesc && (
+                  <div className="staged-spell-card__targets">{targetDesc}</div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
   const battlefieldStage = (
     <div className="battlefield-stage">
       <div className="battlefield-stage__cards">
@@ -6815,15 +7192,89 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
               !battlefieldLocked &&
               !combatContext;
             const canShowCommenceButton = canFinishMovementHere;
+            const playerControlsBattlefield = field.controller === playerId;
+            const hiddenCard = field.hiddenCards?.find(hc => hc.ownerId === playerId);
+            const enemyHiddenCard = field.hiddenCards?.find(hc => hc.ownerId !== playerId);
+            // Hidden card can be activated if:
+            // 1. It was set on a previous turn (not this turn)
+            // 2. The player can currently act (their turn OR they're the reaction window holder)
+            const hiddenCardReady = hiddenCard && hiddenCard.hiddenOnTurn !== currentTurnNumber;
+            const canActivateHidden = hiddenCardReady && canAct;
+            // Check if a hand card being dragged can be hidden here (reuse draggingHandCard from above)
+            const canHideDraggedCardHere = draggingHandCard && canHideCardToBattlefield(draggingHandCard, field.battlefieldId);
+            const isHiddenSlotDragHover = canHideDraggedCardHere && dragOverHiddenSlotId === field.battlefieldId;
             return (
               <div
-                className={battlefieldCardClass}
+                className="battlefield-stage__card-wrapper"
                 key={field.battlefieldId}
-                title={battlefieldLockReason ?? undefined}
-                onDragOver={(event) => handleBattlefieldDragOver(field.battlefieldId, event)}
-                onDragLeave={(event) => handleBattlefieldDragLeave(field.battlefieldId, event)}
-                onDrop={(event) => handleBattlefieldDrop(field.battlefieldId, event)}
               >
+                {/* Hidden Card Slot - Left side */}
+                <div 
+                  className={[
+                    'battlefield-stage__hidden-slot',
+                    playerControlsBattlefield ? 'battlefield-stage__hidden-slot--controlled' : '',
+                    canHideDraggedCardHere ? 'battlefield-stage__hidden-slot--drop-target' : '',
+                    isHiddenSlotDragHover ? 'battlefield-stage__hidden-slot--drag-hover' : '',
+                  ].filter(Boolean).join(' ')}
+                  onDragOver={(event) => handleHiddenSlotDragOver(field.battlefieldId, event)}
+                  onDragLeave={(event) => handleHiddenSlotDragLeave(field.battlefieldId, event)}
+                  onDrop={(event) => handleHiddenSlotDrop(field.battlefieldId, event)}
+                >
+                  {hiddenCard ? (
+                    <div
+                      className={`battlefield-stage__hidden-card battlefield-stage__hidden-card--owned ${canActivateHidden ? 'battlefield-stage__hidden-card--activatable' : ''} ${hiddenCardReady && !canActivateHidden ? 'battlefield-stage__hidden-card--ready' : ''}`}
+                      title={hiddenCard.card?.name ?? 'Hidden Card'}
+                    >
+                      <div className="battlefield-stage__hidden-card-inner">
+                        {hiddenCard.card && (
+                          <>
+                            <span className="battlefield-stage__hidden-card-icon">🎴</span>
+                            <span className="battlefield-stage__hidden-card-name">{hiddenCard.card.name}</span>
+                            {canActivateHidden ? (
+                              <button
+                                type="button"
+                                className="battlefield-stage__hidden-reveal-btn"
+                                onClick={() => handleActivateHiddenCard(hiddenCard.instanceId)}
+                                disabled={activatingHiddenCard}
+                              >
+                                {activatingHiddenCard ? '…' : 'Reveal'}
+                              </button>
+                            ) : hiddenCardReady ? (
+                              <span className="battlefield-stage__hidden-card-ready-text">✓ Ready</span>
+                            ) : (
+                              <span className="battlefield-stage__hidden-card-wait">⏳ Set this turn</span>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ) : enemyHiddenCard ? (
+                    <div
+                      className="battlefield-stage__hidden-card battlefield-stage__hidden-card--enemy"
+                      title="Opponent's Hidden Card"
+                    >
+                      <div className="battlefield-stage__hidden-card-inner">
+                        <span className="battlefield-stage__hidden-card-icon">🂠</span>
+                        <span className="battlefield-stage__hidden-card-label">Hidden</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="battlefield-stage__hidden-card battlefield-stage__hidden-card--empty">
+                      <div className="battlefield-stage__hidden-card-inner">
+                        <span className="battlefield-stage__hidden-card-icon-empty">⬡</span>
+                        <span className="battlefield-stage__hidden-card-label">Hidden Slot</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                {/* Battlefield Card */}
+                <div
+                  className={battlefieldCardClass}
+                  title={battlefieldLockReason ?? undefined}
+                  onDragOver={(event) => handleBattlefieldDragOver(field.battlefieldId, event)}
+                  onDragLeave={(event) => handleBattlefieldDragLeave(field.battlefieldId, event)}
+                  onDrop={(event) => handleBattlefieldDrop(field.battlefieldId, event)}
+                >
                 <div className="battlefield-stage__art-wrapper">
                   {art ? (
                     <img
@@ -6867,11 +7318,20 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                           .map((entry) => {
                             const isTarget = isValidSpellTarget(entry.card);
                             const isTargetSelected = isSpellTargetSelected(entry.card);
+                            const isChainTargeted = isChainTarget(entry.card);
+                            const isPromptTarget = isValidPromptTarget(entry.card);
+                            const isPromptSelected = isPromptTargetSelected(entry.card);
                             const unitClasses = [
                               'battlefield-stage__unit',
-                              isTarget ? 'battlefield-stage__unit--spell-target' : '',
-                              isTargetSelected ? 'battlefield-stage__unit--target-selected' : '',
+                              isTarget || isPromptTarget ? 'battlefield-stage__unit--spell-target' : '',
+                              isTargetSelected || isPromptSelected ? 'battlefield-stage__unit--target-selected' : '',
+                              isChainTargeted ? 'battlefield-stage__unit--chain-target' : '',
                             ].filter(Boolean).join(' ');
+                            const handleClick = isTarget
+                              ? () => handleSpellTargetClick(entry.card)
+                              : isPromptTarget
+                                ? () => handlePromptTargetClick(entry.card)
+                                : undefined;
                             return (
                               <div
                                 key={`${field.battlefieldId}-${cardIdValue(entry.card)}-opponent`}
@@ -6881,9 +7341,9 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                                   card={entry.card}
                                   compact
                                   onHover={handleCardHover}
-                                  selectable={isTarget}
-                                  isSelected={isTargetSelected}
-                                  onClick={isTarget ? () => handleSpellTargetClick(entry.card) : undefined}
+                                  selectable={isTarget || isPromptTarget}
+                                  isSelected={isTargetSelected || isPromptSelected}
+                                  onClick={handleClick}
                                 />
                               </div>
                             );
@@ -6907,18 +7367,24 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                             );
                             const isTarget = isValidSpellTarget(entry.card);
                             const isTargetSelected = isSpellTargetSelected(entry.card);
+                            const isChainTargeted = isChainTarget(entry.card);
+                            const isPromptTarget = isValidPromptTarget(entry.card);
+                            const isPromptSelected = isPromptTargetSelected(entry.card);
                             const unitClasses = [
                               'battlefield-stage__unit',
                               'battlefield-stage__unit--self',
-                              isTarget ? 'battlefield-stage__unit--spell-target' : '',
-                              isTargetSelected ? 'battlefield-stage__unit--target-selected' : '',
+                              isTarget || isPromptTarget ? 'battlefield-stage__unit--spell-target' : '',
+                              isTargetSelected || isPromptSelected ? 'battlefield-stage__unit--target-selected' : '',
+                              isChainTargeted ? 'battlefield-stage__unit--chain-target' : '',
                             ].filter(Boolean).join(' ');
-                            // If targeting a spell, prioritize that click handler
+                            // If targeting a spell or prompt, prioritize that click handler
                             const handleClick = isTarget
                               ? () => handleSpellTargetClick(entry.card)
-                              : canAct
-                                ? () => handleSelectUnit(entry.card)
-                                : undefined;
+                              : isPromptTarget
+                                ? () => handlePromptTargetClick(entry.card)
+                                : canAct
+                                  ? () => handleSelectUnit(entry.card)
+                                  : undefined;
                             return (
                               <div
                                 key={`${field.battlefieldId}-${cardKey}-self`}
@@ -6927,17 +7393,17 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                                 <CardTile
                                   card={displayCard}
                                   compact
-                                  selectable={canAct || isTarget}
-                                  isSelected={isSelected || isTargetSelected}
+                                  selectable={canAct || isTarget || isPromptTarget}
+                                  isSelected={isSelected || isTargetSelected || isPromptSelected}
                                   onClick={handleClick}
-                                  draggable={canDragUnit && !isTarget}
+                                  draggable={canDragUnit && !isTarget && !isPromptTarget}
                                   onDragStart={
-                                    canDragUnit && !isTarget
+                                    canDragUnit && !isTarget && !isPromptTarget
                                       ? (event) => handleUnitDragStart(entry.card, event)
                                       : undefined
                                   }
                                   onDragEnd={
-                                    canDragUnit && !isTarget
+                                    canDragUnit && !isTarget && !isPromptTarget
                                       ? (event) => handleUnitDragEnd(entry.card, event)
                                       : undefined
                                   }
@@ -6986,6 +7452,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                   <p className="muted small">{battlefieldLockReason}</p>
                 )}
               </div>
+              {/* End Battlefield Card */}
+            </div>
             );
           })
         )}
@@ -7068,6 +7536,51 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       </div>
     ) : null;
 
+  // Unit target prompt banner - shows when selecting targets for an effect (unit scope)
+  const unitTargetPromptBanner =
+    playerTargetPrompt && targetScope === 'unit' && !showInitiativeScreen && !showBattlefieldScreen ? (
+      <div className="spell-targeting-banner" role="status">
+        <div className="spell-targeting-banner__info">
+          <span>Select Target{targetSelectionMax > 1 ? 's' : ''}</span>
+          <strong>{targetSourceName ?? 'Effect'}</strong>
+          <div className="spell-targeting-banner__details">
+            <span>
+              Selected: {targetSelection.length}
+              {targetSelectionMin > 0 || targetSelectionMax > 0 
+                ? ` / ${targetSelectionMax || targetSelectionMin}` 
+                : ''}
+            </span>
+          </div>
+        </div>
+        <div className="spell-targeting-banner__actions">
+          {canConfirmTarget ? (
+            <button
+              type="button"
+              className="prompt-button primary"
+              onClick={handleConfirmTargetSelection}
+              disabled={submittingTargetSelection}
+            >
+              {submittingTargetSelection ? 'Confirming…' : 'Confirm Targets'}
+            </button>
+          ) : null}
+        </div>
+      </div>
+    ) : null;
+
+  // Unit target waiting banner - shows when waiting for opponent to select a unit
+  const unitTargetWaitingBanner =
+    unitTargetWaitingMessage && !showInitiativeScreen && !showBattlefieldScreen ? (
+      <div className="spell-targeting-banner spell-targeting-banner--waiting" role="status">
+        <div className="spell-targeting-banner__info">
+          <span className="phase-spinner" aria-hidden="true" />
+          <span>{unitTargetWaitingMessage}</span>
+          {opponentTargetSourceName && (
+            <strong>{opponentTargetSourceName}</strong>
+          )}
+        </div>
+      </div>
+    ) : null;
+
   const matchInfoPanel = (
     <div className="match-info-panel">
       <div>
@@ -7127,12 +7640,20 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const spellTargetingSticky = spellTargetingBanner ? (
     <div className="spell-targeting-sticky">{spellTargetingBanner}</div>
   ) : null;
+  const unitTargetPromptSticky = unitTargetPromptBanner ? (
+    <div className="spell-targeting-sticky">{unitTargetPromptBanner}</div>
+  ) : null;
+  const unitTargetWaitingSticky = unitTargetWaitingBanner ? (
+    <div className="spell-targeting-sticky">{unitTargetWaitingBanner}</div>
+  ) : null;
   const matchStatusHeader = (
     <div className="match-status-frame">
       <div className="match-status-sticky">
         {matchStatusCluster}
         {combatPrioritySticky}
         {spellTargetingSticky}
+        {unitTargetPromptSticky}
+        {unitTargetWaitingSticky}
       </div>
       {opponentHandBanner ? (
         <div className="match-status-hand">{opponentHandBanner}</div>
@@ -7584,6 +8105,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                   compact
                   widthPx={150}
                   onHover={handleCardHover}
+                  forceUntapped
                 />
               );
             })
@@ -7607,6 +8129,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           <div className="duel-stage">
             {renderPlayerZone('opponent')}
             <div className="arena-divider">
+              {stagedSpellsStack}
               {battlefieldStage}
               {boardPrompts}
             </div>

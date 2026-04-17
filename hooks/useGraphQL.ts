@@ -12,6 +12,8 @@ import {
   PLAY_CARD,
   ATTACK,
   MOVE_UNIT,
+  HIDE_CARD,
+  ACTIVATE_HIDDEN_CARD,
   COMMENCE_BATTLE,
   NEXT_PHASE,
   RECORD_DUEL_LOG_ENTRY,
@@ -143,6 +145,14 @@ export function useAttack() {
 
 export function useMoveUnit() {
   return useMutation(MOVE_UNIT);
+}
+
+export function useHideCard() {
+  return useMutation(HIDE_CARD);
+}
+
+export function useActivateHiddenCard() {
+  return useMutation(ACTIVATE_HIDDEN_CARD);
 }
 
 export function useCommenceBattle() {
