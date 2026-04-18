@@ -33,6 +33,7 @@ import {
   LEAVE_MATCHMAKING_QUEUE,
   GET_MATCH_REPLAY,
   GET_RECENT_MATCHES,
+  START_BOT_MATCH,
   SUBMIT_MULLIGAN,
   SUBMIT_DISCARD_SELECTION,
   SUBMIT_TARGET_SELECTION,
@@ -285,6 +286,10 @@ export function useRecentMatches(limit = 10) {
   return useQuery(GET_RECENT_MATCHES, {
     variables: { limit },
   });
+}
+
+export function useStartBotMatch() {
+  return useMutation(START_BOT_MATCH);
 }
 
 // ============================================================================

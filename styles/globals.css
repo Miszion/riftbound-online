@@ -1680,6 +1680,8 @@ button.primary {
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
+  max-width: min(95vw, 1800px);
+  width: min(95vw, 1800px);
 }
 
 .spectate-layout {
@@ -1805,11 +1807,11 @@ button.primary {
 }
 
 .zone-cards.compact .card-visual {
-  width: 140px;
+  width: min(140px, 14vw);
 }
 
 .card-visual {
-  width: 180px;
+  width: min(180px, 18vw);
   border-radius: 12px;
   overflow: hidden;
   border: 1px solid rgba(var(--color-surface-contrast-rgb), 0.08);
@@ -1832,6 +1834,26 @@ button.primary {
   height: 110px;
   background-size: cover;
   background-position: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.card-visual--placeholder {
+  border-style: dashed;
+  border-color: rgba(255, 215, 114, 0.5);
+  background: rgba(40, 20, 40, 0.55);
+}
+
+.card-art__placeholder {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: rgba(255, 215, 114, 0.9);
+  padding: 0.35rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  word-break: break-word;
 }
 
 .card-info {

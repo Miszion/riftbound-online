@@ -1,17 +1,10 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import Header from '@/components/Header'
 import Footer from '@/components/Footer'
 import RequireAuth from '@/components/auth/RequireAuth'
-import GameViewer from '@/components/GameViewer'
-import {
-  useCardCatalog,
-  useGameStateSubscription,
-  useMatch,
-  useMatchReplay,
-  useRecentMatches,
-} from '@/hooks/useGraphQL'
+import { useRecentMatches } from '@/hooks/useGraphQL'
 
 export default function SpectatePage() {
   return (
@@ -22,67 +15,19 @@ export default function SpectatePage() {
 }
 
 function SpectateContent() {
-  const [liveInput, setLiveInput] = useState('')
-  const [liveMatchId, setLiveMatchId] = useState('')
-  const [selectedReplayId, setSelectedReplayId] = useState<string | null>(null)
-  const [statusMessage, setStatusMessage] = useState<string | null>(null)
-
-  const { data: liveQueryData } = useMatch(liveMatchId || null)
-  const { data: liveSubData } = useGameStateSubscription(
-    liveMatchId || null,
-  )
-  const { data: catalogData } = useCardCatalog({ limit: 600 })
-  const { data: replayData, refetch: refetchReplay } = useMatchReplay(
-    selectedReplayId,
-  )
+  const router = useRouter()
   const {
     data: recentMatchesData,
     refetch: refetchRecentMatches,
   } = useRecentMatches(12)
 
-  const [spectatorState, setSpectatorState] = useState<any | null>(null)
-  const [spectatorMoves, setSpectatorMoves] = useState<any[]>([])
-
-  useEffect(() => {
-    if (liveQueryData?.match) {
-      setSpectatorState(liveQueryData.match)
-      setSpectatorMoves(liveQueryData.match.moveHistory || [])
-    }
-  }, [liveQueryData])
-
-  useEffect(() => {
-    if (liveSubData?.gameStateChanged) {
-      setSpectatorState(liveSubData.gameStateChanged)
-      setSpectatorMoves(liveSubData.gameStateChanged.moveHistory || [])
-    }
-  }, [liveSubData])
-
-  const catalogIndex = useMemo(() => {
-    if (!catalogData?.cardCatalog) return {}
-    const index: Record<string, any> = {}
-    catalogData.cardCatalog.forEach((card: any) => {
-      index[card.id] = card
-      index[card.slug?.toLowerCase()] = card
-      index[card.name.toLowerCase()] = card
-    })
-    return index
-  }, [catalogData])
-
-  const replay = replayData?.matchReplay
   const recentMatches = recentMatchesData?.recentMatches ?? []
 
-  const handleLoadLive = () => {
-    setLiveMatchId(liveInput.trim())
-    setStatusMessage(
-      liveInput.trim()
-        ? `Spectating live match ${liveInput.trim()}`
-        : 'Enter a match ID',
-    )
-  }
-
-  const handleLoadReplay = (matchId: string) => {
-    setSelectedReplayId(matchId)
-    refetchReplay?.({ matchId })
+  // Completed matches open the real interactive GameBoard via the
+  // /replay/[matchId] route. Starting a new bot match now lives on the
+  // landing page (app/page.tsx) and routes to /game/[matchId].
+  const handleWatchReplay = (matchId: string) => {
+    router.push(`/replay/${matchId}`)
   }
 
   return (
@@ -90,31 +35,6 @@ function SpectateContent() {
       <Header />
       <main className="spectate container">
         <div className="spectate-layout">
-          <section className="spectate-card">
-            <h3>Live Spectate</h3>
-            <p className="muted small">
-              Enter the match ID you want to watch in real-time.
-            </p>
-            <div className="spectate-control">
-              <label>
-                Match ID
-                <input
-                  type="text"
-                  placeholder="match-123"
-                  value={liveInput}
-                  onChange={(event) => setLiveInput(event.target.value)}
-                />
-              </label>
-              <button className="cta" onClick={handleLoadLive}>
-                Watch Live
-              </button>
-            </div>
-            {statusMessage && (
-              <p className="muted small" aria-live="polite">
-                {statusMessage}
-              </p>
-            )}
-          </section>
           <section className="spectate-card">
             <div className="recent-header">
               <h3>Recent Matches</h3>
@@ -125,6 +45,10 @@ function SpectateContent() {
                 Refresh
               </button>
             </div>
+            <p className="muted small">
+              Replays of finished matches. To watch a live bot match, start one
+              from the home page.
+            </p>
             <ul className="recent-list">
               {recentMatches.map((match: any) => (
                 <li key={match.matchId}>
@@ -137,9 +61,9 @@ function SpectateContent() {
                   </div>
                   <button
                     className="btn secondary"
-                    onClick={() => handleLoadReplay(match.matchId)}
+                    onClick={() => handleWatchReplay(match.matchId)}
                   >
-                    Replay
+                    Watch Replay
                   </button>
                 </li>
               ))}
@@ -149,24 +73,6 @@ function SpectateContent() {
             </ul>
           </section>
         </div>
-
-        {spectatorState && (
-          <GameViewer
-            state={spectatorState}
-            moves={spectatorMoves}
-            catalogIndex={catalogIndex}
-            title="Live Match"
-          />
-        )}
-
-        {replay && replay.finalState && (
-          <GameViewer
-            state={replay.finalState}
-            moves={replay.moves}
-            catalogIndex={catalogIndex}
-            title={`Replay · ${replay.matchId}`}
-          />
-        )}
       </main>
       <Footer />
     </>

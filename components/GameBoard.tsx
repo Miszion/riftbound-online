@@ -41,6 +41,14 @@ import {
 import type { ToastTone } from '@/components/ui/ToastStack';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import useToasts from '@/hooks/useToasts';
+import ReplayControls from '@/components/ReplayControls';
+import {
+  buildPlayerMatchView as buildReplayPlayerMatchView,
+  deriveInitialState as deriveReplayInitialState,
+  stateAtMove as replayStateAtMove,
+  type ReplayMove,
+  type ReplaySpectatorState,
+} from '@/lib/replay/reducer';
 import doransBladeImg from '@/public/images/dorans-blade.jpg';
 import doransShieldImg from '@/public/images/dorans-shield.jpg';
 import doransRingImg from '@/public/images/dorans-ring.jpg';
@@ -711,9 +719,39 @@ type SpectatorGameState = {
   reactionChain?: ReactionChain | null;
 };
 
+/**
+ * Replay mode input. When supplied, GameBoard bypasses every live hook (no
+ * subscriptions, no mutations) and instead drives its display off of a
+ * locally-reduced state timeline. See `lib/replay/reducer.ts` for reducer
+ * details.
+ */
+export interface ReplayInput {
+  moves: import('@/lib/replay/reducer').ReplayMove[];
+  /**
+   * Optional pre-computed starting state. If omitted, GameBoard derives one
+   * by reverse-applying the moves to `finalState`.
+   */
+  initialState?: import('@/lib/replay/reducer').ReplaySpectatorState;
+  /** Authoritative end-of-match spectator state (from backend). */
+  finalState: import('@/lib/replay/reducer').ReplaySpectatorState;
+  /** Multiplier applied to the default 600ms tick interval. Default 1. */
+  speed?: number;
+  /** Which player's hand to reveal. Default: first player. */
+  perspectivePlayerId?: string;
+}
+
 interface GameBoardProps {
   matchId: string;
   playerId: string;
+  /** When set, board renders in replay-only mode. See {@link ReplayInput}. */
+  replay?: ReplayInput;
+  /**
+   * When true, board renders as a live spectator: subscription/query stay
+   * active for the given matchId, but all mutations are no-ops and
+   * participant-only modals (mulligan, discard, target, initiative,
+   * battlefield picker, spell reaction, etc.) stay hidden.
+   */
+  spectator?: boolean;
 }
 
 export default GameBoard;
@@ -2422,32 +2460,66 @@ const MatchResultOverlay = ({
   opponentName,
   reasonLabel,
   onReturn,
+  onWatchReplay,
+  onViewHistory,
+  spectator,
+  winnerName,
 }: {
   didWin: boolean;
   opponentName: string;
   reasonLabel: string;
-  onReturn: () => void;
+  onReturn?: () => void;
+  onWatchReplay?: () => void;
+  onViewHistory?: () => void;
+  spectator?: boolean;
+  winnerName?: string | null;
 }) => (
   <div
     className={[
       'match-result-overlay',
-      didWin ? 'match-result-overlay--win' : 'match-result-overlay--loss',
+      spectator
+        ? 'match-result-overlay--neutral'
+        : didWin
+          ? 'match-result-overlay--win'
+          : 'match-result-overlay--loss',
     ]
       .filter(Boolean)
       .join(' ')}
   >
-    {didWin ? <ConfettiBurst /> : <RaindropShower />}
+    {!spectator && (didWin ? <ConfettiBurst /> : <RaindropShower />)}
     <div className="match-result-overlay__panel" role="dialog" aria-modal="true">
-      <h3>{didWin ? 'Victory!' : 'Defeat'}</h3>
+      <h3>{spectator ? 'Match Complete' : didWin ? 'Victory!' : 'Defeat'}</h3>
       <p>
-        {didWin
-          ? `You triumphed over ${opponentName}.`
-          : `${opponentName} has claimed this duel.`}
+        {spectator
+          ? winnerName
+            ? `${winnerName} has claimed this duel.`
+            : 'The duel has concluded.'
+          : didWin
+            ? `You triumphed over ${opponentName}.`
+            : `${opponentName} has claimed this duel.`}
       </p>
       <p className="match-result-overlay__reason">Reason: {reasonLabel}</p>
-      <button type="button" className="prompt-button primary" onClick={onReturn}>
-        Return to Matchmaking
-      </button>
+      <div className="match-result-overlay__actions">
+        {!spectator && onReturn && (
+          <button type="button" className="prompt-button primary" onClick={onReturn}>
+            Return to Matchmaking
+          </button>
+        )}
+        {onWatchReplay && (
+          <button
+            type="button"
+            className={spectator ? 'prompt-button primary' : 'prompt-button'}
+            onClick={onWatchReplay}
+          >
+            Watch Replay
+          </button>
+        )}
+        {onViewHistory && (
+          <button type="button" className="prompt-button" onClick={onViewHistory}>
+            Match History
+          </button>
+        )}
+      </div>
     </div>
   </div>
 );
@@ -2473,28 +2545,45 @@ const isMatchNotFoundError = (error?: ApolloError | null) => {
   );
 };
 
-export function GameBoard({ matchId, playerId }: GameBoardProps) {
+export function GameBoard({ matchId, playerId, replay, spectator }: GameBoardProps) {
+  // In replay mode we must NEVER open live subscriptions or fire mutations.
+  // Passing an empty string to the GraphQL hooks triggers their `skip` guard,
+  // so no network calls are made. Mutations are also neutered below via
+  // `replayMode` so any accidental call site resolves to a no-op promise.
+  //
+  // In spectator mode we DO want the live match query + subscription to fire
+  // (so a non-participant can watch bot matches in real time), but we still
+  // want every mutation and every player-input modal disabled. To do that we
+  // keep `liveMatchId = matchId` but zero out `livePlayerId` so the
+  // player-scoped subscription and player-scoped query are skipped, and we
+  // gate each mutation call site with `replayMode || spectatorMode`.
+  const replayMode = Boolean(replay);
+  const spectatorMode = Boolean(spectator) && !replayMode;
+  const liveMatchId = replayMode ? '' : matchId;
+  const livePlayerId = replayMode || spectatorMode ? '' : playerId;
+
   const {
     data: basePlayerData,
     loading: playerLoading,
     error: playerError,
     refetch: refetchPlayerMatch,
-  } = usePlayerMatch(matchId, playerId);
+  } = usePlayerMatch(liveMatchId, livePlayerId);
   const {
     data: baseSpectatorData,
     loading: spectatorLoading,
     error: spectatorError,
     refetch: refetchMatch,
-  } = useMatch(matchId);
+  } = useMatch(liveMatchId);
 
   const { data: playerSubData } = usePlayerGameStateSubscription(
-    matchId,
-    playerId
+    liveMatchId,
+    livePlayerId
   );
-  const { data: spectatorSubData } = useGameStateSubscription(matchId);
-  const { data: cardPlayedData } = useCardPlayedSubscription(matchId);
-  const { data: attackDeclaredData } = useAttackDeclaredSubscription(matchId);
-  const { data: phaseChangedData } = usePhaseChangedSubscription(matchId);
+  const { data: spectatorSubData } = useGameStateSubscription(liveMatchId);
+  const { data: cardPlayedData } = useCardPlayedSubscription(liveMatchId);
+  const { data: attackDeclaredData } =
+    useAttackDeclaredSubscription(liveMatchId);
+  const { data: phaseChangedData } = usePhaseChangedSubscription(liveMatchId);
 
   const [playCard, { loading: playingCard }] = usePlayCard();
   const [moveUnit, { loading: movingUnit }] = useMoveUnit();
@@ -2525,6 +2614,90 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const router = useRouter();
   const [playerOverride, setPlayerOverride] = useState<PlayerMatchView | null>(null);
   const [spectatorOverride, setSpectatorOverride] = useState<SpectatorGameState | null>(null);
+
+  // =========================================================================
+  // Replay mode: local playback state + reducer wiring
+  // =========================================================================
+  const replayMoves: ReplayMove[] = useMemo(
+    () => (replay?.moves ?? []) as ReplayMove[],
+    [replay]
+  );
+  const replayTotal = replayMoves.length;
+
+  // Derive (or accept) the approximate pre-match state. We compute this only
+  // when replay input changes so the reducer's reverse-walk doesn't run on
+  // every render.
+  const replayInitialState: ReplaySpectatorState | null = useMemo(() => {
+    if (!replay) return null;
+    if (replay.initialState) return replay.initialState;
+    if (!replay.finalState) return null;
+    return deriveReplayInitialState(replay.finalState, replayMoves);
+  }, [replay, replayMoves]);
+
+  const availableReplayPlayerIds = useMemo(() => {
+    if (!replay?.finalState?.players) return [] as string[];
+    return replay.finalState.players
+      .map((p: any) => p?.playerId)
+      .filter((id: unknown): id is string => typeof id === 'string' && !!id);
+  }, [replay]);
+
+  const [replayMoveIndex, setReplayMoveIndex] = useState(0);
+  const [replayPlaying, setReplayPlaying] = useState(false);
+  const [replaySpeed, setReplaySpeed] = useState<number>(replay?.speed ?? 1);
+  const [replayPerspective, setReplayPerspective] = useState<string>(
+    () =>
+      replay?.perspectivePlayerId ??
+      availableReplayPlayerIds[0] ??
+      playerId ??
+      ''
+  );
+
+  // Reset playback whenever a new replay is loaded.
+  useEffect(() => {
+    if (!replay) return;
+    setReplayMoveIndex(0);
+    setReplayPlaying(false);
+    setReplaySpeed(replay.speed ?? 1);
+    setReplayPerspective(
+      replay.perspectivePlayerId ??
+        (replay.finalState?.players?.[0] as any)?.playerId ??
+        ''
+    );
+  }, [replay]);
+
+  // Auto-advance loop. 600ms base tick, divided by playback multiplier.
+  useEffect(() => {
+    if (!replayMode || !replayPlaying) return undefined;
+    if (replayMoveIndex >= replayTotal) {
+      setReplayPlaying(false);
+      return undefined;
+    }
+    const interval = Math.max(50, Math.round(600 / Math.max(replaySpeed, 0.25)));
+    const timer = setTimeout(() => {
+      setReplayMoveIndex((prev) => Math.min(replayTotal, prev + 1));
+    }, interval);
+    return () => clearTimeout(timer);
+  }, [replayMode, replayPlaying, replayMoveIndex, replayTotal, replaySpeed]);
+
+  // Compute the state at the current move index and push it into the
+  // live-code overrides. Because GameBoard already consumes
+  // `playerOverride` / `spectatorOverride` with highest priority, the rest
+  // of the component renders the replay state exactly like a live match.
+  useEffect(() => {
+    if (!replay || !replayInitialState) return;
+    const reducedSpectator = replayStateAtMove(
+      replayInitialState,
+      replayMoves,
+      replayMoveIndex
+    );
+    const reducedPlayer = buildReplayPlayerMatchView(
+      reducedSpectator,
+      replayPerspective || null
+    );
+    setSpectatorOverride(reducedSpectator as unknown as SpectatorGameState);
+    setPlayerOverride(reducedPlayer as unknown as PlayerMatchView);
+  }, [replay, replayInitialState, replayMoves, replayMoveIndex, replayPerspective]);
+
   const [battlefieldCountdown, setBattlefieldCountdown] = useState<number | null>(null);
   const [battlefieldAdvanceTriggered, setBattlefieldAdvanceTriggered] = useState(false);
   const [battlefieldAdvanceComplete, setBattlefieldAdvanceComplete] = useState(false);
@@ -2681,6 +2854,9 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       playerId?: string | null;
       actorName?: string | null;
     }) => {
+      if (replayMode || spectatorMode) {
+        return;
+      }
       if (!matchId || !id) {
         return;
       }
@@ -3003,6 +3179,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   }, [optimisticTapCount, playerCreatures]);
   const moveUnitToLocation = useCallback(
     async (unitId: string, destinationId: string) => {
+      if (replayMode || spectatorMode) return;
       const unitCard = playerCreatures.find((card) => card.instanceId === unitId);
       if (!unitCard) {
         notify('Unable to locate that unit.', 'error', { banner: true });
@@ -3093,11 +3270,14 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const opponent: OpponentSummary | undefined = playerView?.opponent ?? undefined;
   const flow: GameStateView | undefined = playerView?.gameState;
   const spectatorPlayers = spectatorState?.players ?? [];
-  const spectatorSelf = spectatorPlayers.find(
-    (p) => p.playerId === playerId
-  );
+  // In spectator mode the viewer isn't necessarily in the match roster, so
+  // fall back to the first participant for perspective (mirrors the behavior
+  // in app/replay/[matchId]/page.tsx).
+  const spectatorSelf =
+    spectatorPlayers.find((p) => p.playerId === playerId) ??
+    (spectatorMode ? spectatorPlayers[0] : undefined);
   const spectatorOpponent = spectatorPlayers.find(
-    (p) => p.playerId !== playerId
+    (p) => p.playerId !== (spectatorSelf?.playerId ?? playerId)
   );
   const priorityWindow = spectatorState?.priorityWindow;
   const focusPlayerIdState = spectatorState?.focusPlayerId ?? null;
@@ -4047,6 +4227,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const commenceBattle = useCallback(
     async (battlefieldId: string) => {
+      if (replayMode || spectatorMode) return;
       if (!canAct) {
         notify('You cannot commence combat right now.', 'info', { banner: true });
         return;
@@ -4166,6 +4347,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const handleHideCard = useCallback(
     async (cardIndex: number, battlefieldId: string) => {
+      if (replayMode || spectatorMode) return;
       if (!canPlayCards) {
         notify('You cannot hide cards right now.', 'info', { banner: true });
         return;
@@ -4204,6 +4386,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const handleActivateHiddenCard = useCallback(
     async (hiddenInstanceId: string, targets?: string[]) => {
+      if (replayMode || spectatorMode) return;
       try {
         await activateHiddenCardMutation({
           variables: {
@@ -4461,6 +4644,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       useAccelerate: boolean,
       animateKey?: string | null
     ) => {
+      if (replayMode || spectatorMode) return;
       const card = currentPlayer.hand[cardIndex];
       if (!card) {
         return;
@@ -4510,6 +4694,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       destinationId?: string | null,
       options?: { animateKey?: string | null; skipAcceleratePrompt?: boolean; useAccelerate?: boolean }
     ) => {
+      if (replayMode || spectatorMode) return;
       if (!canPlayCards) {
         return;
       }
@@ -4569,6 +4754,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const handleChampionLeaderDeploy = useCallback(
     async (destinationId?: string | null) => {
+      if (replayMode || spectatorMode) return;
       if (!canPlayCards) {
         notify('You cannot deploy your leader right now.', 'info', { banner: true });
         return;
@@ -4866,6 +5052,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const handleInitiativeChoice = useCallback(
     async (choiceValue: number) => {
+      if (replayMode || spectatorMode) return;
       if (playerInitiativeLocked || awaitingInitiativeResolution) {
         return;
       }
@@ -5049,10 +5236,11 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   );
 
   const confirmSpellWithTargets = useCallback(async () => {
+    if (replayMode || spectatorMode) return;
     if (!pendingSpellTargeting || !canConfirmSpellTarget) {
       return;
     }
-    
+
     const { cardIndex, animateKey } = pendingSpellTargeting;
     const targets = [...spellTargetSelection];
     
@@ -5316,6 +5504,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const submitMulliganChoice = useCallback(
     async (selection: number[]) => {
+      if (replayMode || spectatorMode) return;
       try {
         await submitMulligan({
           variables: {
@@ -5377,6 +5566,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   };
 
   const handleConfirmDiscardSelection = useCallback(() => {
+    if (replayMode || spectatorMode) return;
     if (!playerDiscardPrompt || !matchId || !playerId || submittingDiscardSelection) {
       return;
     }
@@ -5421,6 +5611,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   ]);
 
   const handleConfirmTargetSelection = useCallback(() => {
+    if (replayMode || spectatorMode) return;
     if (!playerTargetPrompt || !matchId || !playerId || submittingTargetSelection) {
       return;
     }
@@ -5488,6 +5679,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   );
 
   const handleSelectBattlefield = async (battlefieldId: string) => {
+    if (replayMode || spectatorMode) return;
     if (!battlefieldId) {
       return;
     }
@@ -5508,6 +5700,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   };
 
   const handleNextPhase = async () => {
+    if (replayMode || spectatorMode) return;
     if (!matchId || !playerId) {
       notify('Match context is missing.', 'error', { banner: true });
       return;
@@ -5539,6 +5732,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   };
 
   const handlePassPriority = useCallback(async () => {
+    if (replayMode || spectatorMode) return;
     if (!combatContext || focusPlayerIdState !== playerId) {
       return;
     }
@@ -5557,6 +5751,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   }, [combatContext, focusPlayerIdState, matchId, notify, passPriority, playerId]);
 
   const handleSpellReactionPass = useCallback(async () => {
+    if (replayMode || spectatorMode) return;
     if (!playerSpellReactionPrompt) {
       return;
     }
@@ -5576,6 +5771,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   }, [matchId, notify, playerId, playerSpellReactionPrompt, respondToSpellReaction]);
 
   const handleChainReactionPass = useCallback(async () => {
+    if (replayMode || spectatorMode) return;
     if (!playerChainReactionPrompt) {
       return;
     }
@@ -5595,6 +5791,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   }, [matchId, notify, playerId, playerChainReactionPrompt, respondToChainReaction]);
 
   const handleChampionLegendActivate = useCallback(async () => {
+    if (replayMode || spectatorMode) return;
     if (!matchId || !playerId) {
       return;
     }
@@ -5648,6 +5845,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   };
 
   const confirmConcede = useCallback(async () => {
+    if (replayMode || spectatorMode) return;
     if (concedingMatch) {
       return;
     }
@@ -5696,9 +5894,21 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     router.push('/matchmaking?fromMatch=true');
   }, [router]);
 
+  const handleWatchReplay = useCallback(() => {
+    if (!matchId) {
+      return;
+    }
+    router.push(`/replay/${matchId}`);
+  }, [router, matchId]);
+
+  const handleViewHistory = useCallback(() => {
+    router.push('/history');
+  }, [router]);
+
   const handleChatSubmit = useCallback(
     async (event?: React.FormEvent) => {
       event?.preventDefault();
+      if (replayMode || spectatorMode) return;
       const trimmed = chatInput.trim();
       if (!trimmed) {
         return;
@@ -6356,9 +6566,11 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const handInteractable = Boolean(mulliganPrompt || canPlayCards);
   const holdBattlefieldReveal = battlefieldAdvanceTriggered && !battlefieldAdvanceComplete;
   const showInitiativeScreen =
+    !spectatorMode &&
     !battlefieldAdvanceTriggered &&
     (rawStatus === 'coin_flip' || (initiativeOutcome && initiativeRevealActive));
   const showBattlefieldScreen =
+    !spectatorMode &&
     !showInitiativeScreen &&
     (isBattlefieldPhaseActive || waitingForBattlefieldData || holdBattlefieldReveal);
   const showingInitiativeResult = Boolean(
@@ -6374,7 +6586,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const matchResultReasonLabel = formatVictoryReason(spectatorState?.endReason ?? null);
   const mulliganPromptPending = playerMulliganPending || opponentMulliganPending;
   const showMulliganModal =
-    mulliganPromptPending && !showInitiativeScreen && !showBattlefieldScreen;
+    mulliganPromptPending && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen;
   const mulliganWaitingMessage =
     !playerMulliganPending && opponentMulliganPending
       ? `Waiting for ${opponentHeading}'s mulligan choice`
@@ -6387,7 +6599,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const canConfirmDiscard =
     Boolean(playerDiscardPrompt) && discardSelection.length === requiredDiscardSelections;
   const showDiscardModal = Boolean(
-    (playerDiscardPrompt || discardWaitingMessage) && !showInitiativeScreen && !showBattlefieldScreen
+    (playerDiscardPrompt || discardWaitingMessage) && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen
   );
   const discardSourceName =
     (playerDiscardPrompt?.data?.sourceCardName as string | undefined) ?? null;
@@ -6410,7 +6622,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       : null;
   // Only show target modal for graveyard/battlefield scopes - unit targeting happens inline on the board
   const showTargetModal = Boolean(
-    ((playerTargetPrompt && targetScope !== 'unit') || targetWaitingMessage) && !showInitiativeScreen && !showBattlefieldScreen
+    ((playerTargetPrompt && targetScope !== 'unit') || targetWaitingMessage) && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen
   );
   
   // Spell targeting modal display
@@ -6435,7 +6647,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                       ? 'Player'
                       : 'Target';
   const showSpellTargetModal = Boolean(
-    pendingSpellTargeting && !showInitiativeScreen && !showBattlefieldScreen
+    pendingSpellTargeting && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen
   );
 
   // Spell reaction display: shows when opponent has cast a spell and you can react
@@ -6444,7 +6656,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       ? `Waiting for ${opponentHeading} to respond to spell…`
       : null;
   const showSpellReactionModal = Boolean(
-    (playerSpellReactionPrompt || spellReactionWaitingMessage) && pendingSpell && !showInitiativeScreen && !showBattlefieldScreen
+    (playerSpellReactionPrompt || spellReactionWaitingMessage) && pendingSpell && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen
   );
   
   // Chain reaction display: shows when there's an active reaction chain
@@ -6453,7 +6665,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       ? `Waiting for ${opponentHeading} to respond to chain…`
       : null;
   const showChainReactionModal = Boolean(
-    (playerChainReactionPrompt || chainReactionWaitingMessage) && reactionChain && !showInitiativeScreen && !showBattlefieldScreen
+    (playerChainReactionPrompt || chainReactionWaitingMessage) && reactionChain && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen
   );
   
   const selfBoardTitle = selfHeading === 'You' ? 'Your Board' : `${selfHeading}'s Board`;
@@ -6466,7 +6678,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const boardPrompts = (
     <div className="prompt-panel board-prompts">
-        {battlefieldPrompt && !showBattlefieldScreen && (
+        {battlefieldPrompt && !spectatorMode && !showBattlefieldScreen && (
           <div className="prompt-card battlefield-prompt">
             <div className="prompt-title">Battlefield Selection</div>
             <p>Select one of your battlefields to bring into the arena.</p>
@@ -7502,7 +7714,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   // Spell targeting banner - shows when selecting targets for a spell
   const spellTargetingBanner =
-    pendingSpellTargeting && pendingSpellCard && !showInitiativeScreen && !showBattlefieldScreen ? (
+    pendingSpellTargeting && pendingSpellCard && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen ? (
       <div className="spell-targeting-banner" role="status">
         <div className="spell-targeting-banner__info">
           <span>Casting</span>
@@ -7538,7 +7750,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   // Unit target prompt banner - shows when selecting targets for an effect (unit scope)
   const unitTargetPromptBanner =
-    playerTargetPrompt && targetScope === 'unit' && !showInitiativeScreen && !showBattlefieldScreen ? (
+    playerTargetPrompt && targetScope === 'unit' && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen ? (
       <div className="spell-targeting-banner" role="status">
         <div className="spell-targeting-banner__info">
           <span>Select Target{targetSelectionMax > 1 ? 's' : ''}</span>
@@ -7569,7 +7781,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   // Unit target waiting banner - shows when waiting for opponent to select a unit
   const unitTargetWaitingBanner =
-    unitTargetWaitingMessage && !showInitiativeScreen && !showBattlefieldScreen ? (
+    unitTargetWaitingMessage && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen ? (
       <div className="spell-targeting-banner spell-targeting-banner--waiting" role="status">
         <div className="spell-targeting-banner__info">
           <span className="phase-spinner" aria-hidden="true" />
@@ -8144,13 +8356,20 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     </>
   );
 
+  const matchWinnerLabel = matchWinnerId
+    ? resolvePlayerLabel(matchWinnerId, 'Winner')
+    : null;
   const matchResultOverlay =
-    matchEnded && opponentNameForResult ? (
+    matchEnded && (spectatorMode || opponentNameForResult) ? (
       <MatchResultOverlay
         didWin={playerWonMatch}
         opponentName={opponentNameForResult}
         reasonLabel={matchResultReasonLabel}
-        onReturn={handleReturnToQueue}
+        onReturn={spectatorMode ? undefined : handleReturnToQueue}
+        onWatchReplay={replayMode ? undefined : handleWatchReplay}
+        onViewHistory={spectatorMode ? undefined : handleViewHistory}
+        spectator={spectatorMode}
+        winnerName={matchWinnerLabel}
       />
     ) : null;
 
@@ -8244,6 +8463,36 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         </div>
       )}
       {matchResultOverlay}
+      {replayMode && replay && (
+        <ReplayControls
+          moveIndex={replayMoveIndex}
+          totalMoves={replayTotal}
+          playing={replayPlaying}
+          speed={replaySpeed}
+          currentPhase={spectatorOverride?.currentPhase ?? ''}
+          turnNumber={spectatorOverride?.turnNumber ?? 0}
+          perspectivePlayerId={replayPerspective}
+          availablePlayerIds={availableReplayPlayerIds}
+          onPlayPauseToggle={() => {
+            if (replayMoveIndex >= replayTotal) {
+              setReplayMoveIndex(0);
+            }
+            setReplayPlaying((prev) => !prev);
+          }}
+          onStep={(delta) => {
+            setReplayPlaying(false);
+            setReplayMoveIndex((prev) =>
+              Math.max(0, Math.min(replayTotal, prev + delta))
+            );
+          }}
+          onScrub={(index) => {
+            setReplayPlaying(false);
+            setReplayMoveIndex(Math.max(0, Math.min(replayTotal, index)));
+          }}
+          onSpeedChange={(speed) => setReplaySpeed(speed)}
+          onPerspectiveChange={(pid) => setReplayPerspective(pid)}
+        />
+      )}
     </div>
   );
 }

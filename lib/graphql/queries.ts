@@ -1513,3 +1513,22 @@ export const GET_RECENT_MATCHES = gql`
     }
   }
 `;
+
+export const START_BOT_MATCH = gql`
+  mutation StartBotMatch(
+    $strategyA: String
+    $strategyB: String
+    $intervalMs: Int
+  ) {
+    startBotMatch(
+      strategyA: $strategyA
+      strategyB: $strategyB
+      intervalMs: $intervalMs
+    ) {
+      matchId
+      players
+      strategies
+      spectatorPath
+    }
+  }
+`;

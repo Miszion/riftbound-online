@@ -17,6 +17,28 @@
   padding: 0 16px;
 }
 
+/**
+ * Wrapper used by /game/[matchId] and /replay/[matchId] to mount <GameBoard>.
+ * Without this rule the wrapper collapses to intrinsic width, squishing the
+ * board on replay screens (bot-vs-bot replays were the most visible offender).
+ * Match the live game's full-width flex column so GameBoard's own flex layout
+ * can expand edge-to-edge inside the `.game-screen.container` width cap above.
+ */
+.game-screen__board {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  min-height: calc(100vh - 48px);
+  gap: 20px;
+  align-items: stretch;
+}
+
+.game-screen__board > * {
+  width: 100%;
+  min-width: 0;
+}
+
 .arena-layout {
   width: 100%;
   display: flex;
@@ -3630,6 +3652,13 @@
 }
 .match-result-overlay--loss .match-result-overlay__panel {
   border-color: rgba(248, 113, 113, 0.35);
+}
+.match-result-overlay__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 8px;
 }
 
 .match-confetti {

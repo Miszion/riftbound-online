@@ -1,11 +1,43 @@
 'use client'
 
+import { useState } from 'react'
 import Link from 'next/link'
 import Image from 'next/image'
+import { useRouter } from 'next/navigation'
 import Header from '@/components/Header'
 import Footer from '@/components/Footer'
+import { useStartBotMatch } from '@/hooks/useGraphQL'
 
 export default function Home() {
+  const router = useRouter()
+  const [startBotMatch, { loading: startingBotMatch }] = useStartBotMatch()
+  const [botError, setBotError] = useState<string | null>(null)
+
+  const handleStartBotMatch = async () => {
+    setBotError(null)
+    try {
+      const { data } = await startBotMatch({
+        variables: {
+          strategyA: 'aggro',
+          strategyB: 'control',
+        },
+      })
+      const payload = data?.startBotMatch
+      const spectatorPath: string | undefined =
+        payload?.spectatorPath ||
+        (payload?.matchId ? `/game/${encodeURIComponent(payload.matchId)}` : undefined)
+      if (!spectatorPath) {
+        setBotError('Bot match could not be started.')
+        return
+      }
+      router.push(spectatorPath)
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unknown error starting bots.'
+      setBotError(message)
+    }
+  }
+
   return (
     <>
       <Header />
@@ -19,13 +51,27 @@ export default function Home() {
                 Legends. Discover decks, collect champions, and clash on the rift.
               </p>
               <p className="muted">
-                This is a demo homepage and sign-in mockup — not an official Riot Games product.
+                This is a demo homepage and sign-in mockup, not an official Riot Games product.
               </p>
               <p>
                 <Link className="cta" href="/sign-in">
-                  Get started — Sign in
+                  Get started. Sign in
                 </Link>
+                {' '}
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={handleStartBotMatch}
+                  disabled={startingBotMatch}
+                >
+                  {startingBotMatch ? 'Starting bots...' : 'Start bot match'}
+                </button>
               </p>
+              {botError && (
+                <p className="muted small" aria-live="polite">
+                  {botError}
+                </p>
+              )}
             </div>
             <div className="hero-art" aria-hidden="true">
               <div className="card-slab">
