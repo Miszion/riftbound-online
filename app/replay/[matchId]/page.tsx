@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { usePathname, useSearchParams } from 'next/navigation'
 import RequireAuth from '@/components/auth/RequireAuth'
 import GameBoard from '@/components/GameBoard'
@@ -49,8 +49,51 @@ function ReplayPageContent() {
     return ''
   }, [searchParams, pathname])
 
-  const { data, loading, error } = useMatchReplay(matchId || null)
+  const { data, loading, error, refetch } = useMatchReplay(matchId || null)
   const replayRecord = data?.matchReplay ?? null
+
+  // Fresh-match replay race: the replay record may take a moment to persist
+  // after a match ends. If we get a null record, poll for up to ~10s before
+  // surrendering to the "Replay not available" fallback.
+  const firstLoadAtRef = useRef<number | null>(null)
+  const [gaveUpPolling, setGaveUpPolling] = useState(false)
+
+  useEffect(() => {
+    if (!matchId) {
+      firstLoadAtRef.current = null
+      setGaveUpPolling(false)
+      return
+    }
+    if (firstLoadAtRef.current === null) {
+      firstLoadAtRef.current = Date.now()
+    }
+  }, [matchId])
+
+  const hasReplay = Boolean(replayRecord && replayRecord.finalState)
+  const isMissing = Boolean(matchId) && !loading && !error && !hasReplay
+  const elapsed =
+    firstLoadAtRef.current === null ? 0 : Date.now() - firstLoadAtRef.current
+  const shouldPoll = isMissing && !gaveUpPolling && elapsed < 10_000
+
+  useEffect(() => {
+    if (!shouldPoll) {
+      return
+    }
+    const timer = setTimeout(() => {
+      const elapsedNow =
+        firstLoadAtRef.current === null
+          ? 0
+          : Date.now() - firstLoadAtRef.current
+      if (elapsedNow >= 10_000) {
+        setGaveUpPolling(true)
+        return
+      }
+      refetch?.().catch(() => {
+        // Swallow transient refetch errors; the effect will re-schedule.
+      })
+    }, 1000)
+    return () => clearTimeout(timer)
+  }, [shouldPoll, refetch, data])
 
   if (!matchId) {
     return (
@@ -85,6 +128,16 @@ function ReplayPageContent() {
   }
 
   if (!replayRecord || !replayRecord.finalState) {
+    if (!gaveUpPolling && elapsed < 10_000) {
+      return (
+        <main className="game-screen container">
+          <div className="loading-overlay" aria-live="polite">
+            <LoadingSpinner size="lg" />
+            <span>Preparing replay...</span>
+          </div>
+        </main>
+      )
+    }
     return (
       <main className="game-screen container">
         <div className="queue-waiting" aria-live="polite">
