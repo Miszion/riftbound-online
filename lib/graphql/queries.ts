@@ -1510,6 +1510,8 @@ export const GET_RECENT_MATCHES = gql`
       duration
       turns
       createdAt
+      status
+      endReason
     }
   }
 `;

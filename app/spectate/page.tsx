@@ -22,6 +22,61 @@ interface RecentMatch {
   duration?: number | null
   turns?: number | null
   createdAt?: string | number | null
+  status?: string | null
+  endReason?: string | null
+}
+
+type BadgeTone = 'green' | 'amber' | 'slate' | 'red' | 'blue'
+
+interface StatusBadge {
+  label: string
+  tone: BadgeTone
+}
+
+const BADGE_TONE_CLASSES: Record<BadgeTone, string> = {
+  green: 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30',
+  amber: 'bg-amber-500/15 text-amber-300 border border-amber-500/30',
+  slate: 'bg-slate-500/15 text-slate-300 border border-slate-500/30',
+  red: 'bg-rose-500/15 text-rose-300 border border-rose-500/30',
+  blue: 'bg-sky-500/15 text-sky-300 border border-sky-500/30',
+}
+
+function capitalize(value: string): string {
+  if (!value) return value
+  return value.charAt(0).toUpperCase() + value.slice(1)
+}
+
+function getStatusBadge(
+  status: string | null | undefined,
+  endReason: string | null | undefined,
+): StatusBadge {
+  if (status === 'completed') {
+    if (endReason === 'victory_points') return { label: 'Victory Points', tone: 'green' }
+    if (endReason === 'burn_out') return { label: 'Burn-out', tone: 'amber' }
+    if (endReason === 'concede') return { label: 'Concede', tone: 'slate' }
+    if (
+      endReason === 'timeout' ||
+      endReason === 'turn_cap' ||
+      endReason === 'action_cap'
+    ) {
+      return { label: 'Timeout', tone: 'slate' }
+    }
+    return { label: 'Completed', tone: 'slate' }
+  }
+  if (status === 'abandoned') {
+    if (
+      endReason === 'crashed' ||
+      endReason === 'invariant' ||
+      endReason === 'infinite_loop'
+    ) {
+      return { label: 'Error', tone: 'red' }
+    }
+    return { label: 'Abandoned', tone: 'red' }
+  }
+  if (status === 'in_progress' || status == null) {
+    return { label: 'In Progress', tone: 'blue' }
+  }
+  return { label: capitalize(status), tone: 'slate' }
 }
 
 function shortId(id: string): string {
@@ -126,10 +181,18 @@ function SpectateContent() {
                   players.length >= 2
                     ? `${shortId(players[0])} vs ${shortId(players[1])}`
                     : players.map(shortId).join(', ') || '—'
+                const badge = getStatusBadge(match.status, match.endReason)
                 return (
                   <li key={match.matchId}>
                     <div>
-                      <strong>{shortId(match.matchId)}</strong>
+                      <div className="flex items-center gap-2">
+                        <strong>{shortId(match.matchId)}</strong>
+                        <span
+                          className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${BADGE_TONE_CLASSES[badge.tone]}`}
+                        >
+                          {badge.label}
+                        </span>
+                      </div>
                       <p className="muted small">{playerLabel}</p>
                       <p className="muted small">
                         Winner: {winnerLabel} · Turns:{' '}
