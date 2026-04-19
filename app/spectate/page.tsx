@@ -188,6 +188,7 @@ function SpectateContent() {
                       <div className="flex items-center gap-2">
                         <strong>{shortId(match.matchId)}</strong>
                         <span
+                          style={{ marginLeft: '4px' }}
                           className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${BADGE_TONE_CLASSES[badge.tone]}`}
                         >
                           {badge.label}
