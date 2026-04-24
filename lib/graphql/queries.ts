@@ -1531,6 +1531,7 @@ export const START_BOT_MATCH = gql`
       players
       strategies
       spectatorPath
+      availableStrategies
     }
   }
 `;
