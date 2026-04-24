@@ -6,6 +6,7 @@ import Image from 'next/image'
 import { useRouter } from 'next/navigation'
 import Header from '@/components/Header'
 import Footer from '@/components/Footer'
+import ReplayDrawer from '@/components/ReplayDrawer'
 import { useStartBotMatch } from '@/hooks/useGraphQL'
 
 // Backend BE-5 asserts these are the five strategies the engine supports
@@ -182,6 +183,12 @@ export default function Home() {
           </div>
         </section>
       </main>
+      {/* Recent-matches drawer. Clicking a completed match routes to
+          /replay/<id>, which renders the persisted engine frames on the
+          real GameBoard via setSpectatorOverride. The drawer itself was
+          shipped in PR #1 ("mount replay drawer inside the gameboard");
+          mounting it here brings the same entry point to the homepage. */}
+      <ReplayDrawer />
       <Footer />
     </>
   )

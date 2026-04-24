@@ -7,20 +7,23 @@ import GameBoard from '@/components/GameBoard'
 import ReplayDrawer from '@/components/ReplayDrawer'
 import LoadingSpinner from '@/components/ui/LoadingSpinner'
 import { useAuth } from '@/hooks/useAuth'
-import { useMatchReplay } from '@/hooks/useGraphQL'
-import type {
-  ReplayMove,
-  ReplaySpectatorState,
-} from '@/lib/replay/reducer'
+import { useMatchFrames, useMatchReplay } from '@/hooks/useGraphQL'
+import type { ReplaySpectatorState } from '@/lib/replay/reducer'
 
 /**
- * Replay page — mounts the full interactive GameBoard in replay mode.
+ * Replay page - mounts the full interactive GameBoard in replay mode.
  *
  * Route: /replay/[matchId]
  *
- * Fetches the persisted match record via `useMatchReplay` and hands the
- * `finalState` + `moves` to GameBoard's replay prop. The GameBoard itself
- * handles reducer wiring and playback controls.
+ * Reads the per-move `SerializedFrame`s from the `matchFrames` GraphQL query
+ * (backed by the persistent replay-frame store) and hands them to GameBoard's
+ * replay prop. GameBoard's replay pipeline feeds each frame through
+ * `setSpectatorOverride` - the same setter the live subscription uses - so
+ * the same renderer serves both live and replay with zero client-side engine.
+ *
+ * `matchReplay` is still fetched for match metadata (players, winner,
+ * duration) and the fresh-match polling window, but its `finalState` /
+ * `moves` are no longer the source of truth.
  */
 export default function ReplayPage() {
   return (
@@ -50,12 +53,29 @@ function ReplayPageContent() {
     return ''
   }, [searchParams, pathname])
 
-  const { data, loading, error, refetch } = useMatchReplay(matchId || null)
-  const replayRecord = data?.matchReplay ?? null
+  const {
+    data: replayData,
+    loading: replayLoading,
+    error: replayError,
+    refetch: refetchReplay,
+  } = useMatchReplay(matchId || null)
+  const replayRecord = replayData?.matchReplay ?? null
 
-  // Fresh-match replay race: the replay record may take a moment to persist
-  // after a match ends. If we get a null record, poll for up to ~10s before
-  // surrendering to the "Replay not available" fallback.
+  const {
+    data: framesData,
+    loading: framesLoading,
+    error: framesError,
+    refetch: refetchFrames,
+  } = useMatchFrames(matchId || null)
+  const frames: ReplaySpectatorState[] = useMemo(() => {
+    const raw = framesData?.matchFrames
+    if (!Array.isArray(raw)) return []
+    return raw as ReplaySpectatorState[]
+  }, [framesData])
+
+  // Fresh-match race: the replay record + frame store may take a moment to
+  // finalize after a match ends. Poll both queries for up to ~10s before
+  // falling through to the "Replay not available" message.
   const firstLoadAtRef = useRef<number | null>(null)
   const [gaveUpPolling, setGaveUpPolling] = useState(false)
 
@@ -71,7 +91,11 @@ function ReplayPageContent() {
   }, [matchId])
 
   const hasReplay = Boolean(replayRecord && replayRecord.finalState)
-  const isMissing = Boolean(matchId) && !loading && !error && !hasReplay
+  const hasFrames = frames.length > 0
+  const loading = replayLoading || framesLoading
+  const error = replayError ?? framesError
+  const isMissing =
+    Boolean(matchId) && !loading && !error && !hasReplay && !hasFrames
   const elapsed =
     firstLoadAtRef.current === null ? 0 : Date.now() - firstLoadAtRef.current
   const shouldPoll = isMissing && !gaveUpPolling && elapsed < 10_000
@@ -89,12 +113,15 @@ function ReplayPageContent() {
         setGaveUpPolling(true)
         return
       }
-      refetch?.().catch(() => {
-        // Swallow transient refetch errors; the effect will re-schedule.
+      refetchReplay?.().catch(() => {
+        // Swallow transient refetch errors; the effect re-schedules.
+      })
+      refetchFrames?.().catch(() => {
+        // Same swallow-and-retry policy for the frames query.
       })
     }, 1000)
     return () => clearTimeout(timer)
-  }, [shouldPoll, refetch, data])
+  }, [shouldPoll, refetchReplay, refetchFrames, framesData, replayData])
 
   // Pick the inner view based on load/error/polling state. The surrounding
   // <main> + ReplayDrawer stay constant so the drawer is always available,
@@ -108,7 +135,7 @@ function ReplayPageContent() {
         </div>
       )
     }
-    if (loading && !replayRecord) {
+    if (loading && !hasFrames && !hasReplay) {
       return (
         <div className="loading-overlay" aria-live="polite">
           <LoadingSpinner size="lg" />
@@ -123,7 +150,7 @@ function ReplayPageContent() {
         </div>
       )
     }
-    if (!replayRecord || !replayRecord.finalState) {
+    if (!hasFrames) {
       if (!gaveUpPolling && elapsed < 10_000) {
         return (
           <div className="loading-overlay" aria-live="polite">
@@ -136,35 +163,40 @@ function ReplayPageContent() {
         <div className="queue-waiting" aria-live="polite">
           <strong>Replay not available.</strong>
           <span>
-            This match has not been finalized yet or its final state is
-            missing.
+            This match has no persisted frames yet. Only matches finished on the
+            new replay-frame store can be replayed on the board.
           </span>
         </div>
       )
     }
 
     // Default perspective: the viewer's own id if they were a participant,
-    // otherwise the first player in the record.
-    const finalState = replayRecord.finalState as ReplaySpectatorState
-    const moves = (replayRecord.moves ?? []) as ReplayMove[]
-    const participants: string[] = Array.isArray(replayRecord.players)
-      ? replayRecord.players
+    // otherwise the first player in the record / last frame.
+    const recordParticipants: string[] = Array.isArray(replayRecord?.players)
+      ? (replayRecord!.players as string[])
       : []
+    const lastFramePlayers = frames[frames.length - 1]?.players ?? []
+    const framePlayerIds: string[] = Array.isArray(lastFramePlayers)
+      ? lastFramePlayers
+          .map((p: any) => p?.playerId)
+          .filter((id: unknown): id is string => typeof id === 'string' && !!id)
+      : []
+    const participants =
+      recordParticipants.length > 0 ? recordParticipants : framePlayerIds
     const perspectivePlayerId =
       (user?.userId && participants.includes(user.userId)
         ? user.userId
         : participants[0]) ?? undefined
 
-    // We pass a non-empty `matchId` + `playerId` for type compatibility, but
-    // `replay` short-circuits every live hook inside GameBoard.
+    // `replay` short-circuits every live hook inside GameBoard; matchId and
+    // playerId are passed for type compatibility only.
     return (
       <div className="game-screen__board">
         <GameBoard
           matchId={matchId}
           playerId={perspectivePlayerId ?? user?.userId ?? ''}
           replay={{
-            moves,
-            finalState,
+            frames,
             speed: 1,
             perspectivePlayerId,
           }}

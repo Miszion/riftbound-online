@@ -1500,6 +1500,33 @@ export const GET_MATCH_REPLAY = gql`
   }
 `;
 
+// Bot-vs-bot summary list used by the spectate HUD to show which strategies
+// are playing. Returns currently-tracked matches (in-progress + recently
+// completed) with their strategy pairing.
+export const GET_ACTIVE_BOT_MATCHES = gql`
+  query ActiveBotMatches {
+    activeBotMatches {
+      matchId
+      players
+      strategies
+      status
+      winner
+      reason
+    }
+  }
+`;
+
+// Persistent replay-frame store (backend BE-1 + BE-2 + persistent-frame-store).
+// Returns an ordered list of per-move `SerializedFrame` JSON blobs. Each frame
+// is a full spectator-shape GameState snapshot, same format the live
+// gameStateChanged subscription pushes, so the replay page can feed a frame
+// directly into GameBoard's setSpectatorOverride without any client reducer.
+export const GET_MATCH_FRAMES = gql`
+  query MatchFrames($matchId: ID!, $offset: Int, $limit: Int) {
+    matchFrames(matchId: $matchId, offset: $offset, limit: $limit)
+  }
+`;
+
 export const GET_RECENT_MATCHES = gql`
   query RecentMatches($limit: Int) {
     recentMatches(limit: $limit) {

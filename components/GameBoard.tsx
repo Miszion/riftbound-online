@@ -44,9 +44,7 @@ import useToasts from '@/hooks/useToasts';
 import ReplayControls from '@/components/ReplayControls';
 import {
   buildPlayerMatchView as buildReplayPlayerMatchView,
-  deriveInitialState as deriveReplayInitialState,
-  stateAtMove as replayStateAtMove,
-  type ReplayMove,
+  frameAt as replayFrameAt,
   type ReplaySpectatorState,
 } from '@/lib/replay/reducer';
 import doransBladeImg from '@/public/images/dorans-blade.jpg';
@@ -721,19 +719,20 @@ type SpectatorGameState = {
 
 /**
  * Replay mode input. When supplied, GameBoard bypasses every live hook (no
- * subscriptions, no mutations) and instead drives its display off of a
- * locally-reduced state timeline. See `lib/replay/reducer.ts` for reducer
- * details.
+ * subscriptions, no mutations) and drives its display off a pre-recorded
+ * list of engine-serialized frames fetched from the `matchFrames` GraphQL
+ * query. Each frame is the exact spectator-shape snapshot the engine
+ * publishes in live play, so the replay path and the live path share a
+ * single renderer - no client-side mini-engine.
  */
 export interface ReplayInput {
-  moves: import('@/lib/replay/reducer').ReplayMove[];
   /**
-   * Optional pre-computed starting state. If omitted, GameBoard derives one
-   * by reverse-applying the moves to `finalState`.
+   * Ordered list of per-move `SerializedFrame`s from the persistent replay-
+   * frame store. `frames[0]` is the initial state, `frames[i]` is the state
+   * after move `i - 1`. Expect `frames.length === moveHistory.length + 1`
+   * for a completed match.
    */
-  initialState?: import('@/lib/replay/reducer').ReplaySpectatorState;
-  /** Authoritative end-of-match spectator state (from backend). */
-  finalState: import('@/lib/replay/reducer').ReplaySpectatorState;
+  frames: import('@/lib/replay/reducer').ReplaySpectatorState[];
   /** Multiplier applied to the default 600ms tick interval. Default 1. */
   speed?: number;
   /** Which player's hand to reveal. Default: first player. */
@@ -2616,30 +2615,31 @@ export function GameBoard({ matchId, playerId, replay, spectator }: GameBoardPro
   const [spectatorOverride, setSpectatorOverride] = useState<SpectatorGameState | null>(null);
 
   // =========================================================================
-  // Replay mode: local playback state + reducer wiring
+  // Replay mode: frame index over a pre-recorded engine timeline
   // =========================================================================
-  const replayMoves: ReplayMove[] = useMemo(
-    () => (replay?.moves ?? []) as ReplayMove[],
+  const replayFrames: ReplaySpectatorState[] = useMemo(
+    () => (replay?.frames ?? []) as ReplaySpectatorState[],
     [replay]
   );
-  const replayTotal = replayMoves.length;
-
-  // Derive (or accept) the approximate pre-match state. We compute this only
-  // when replay input changes so the reducer's reverse-walk doesn't run on
-  // every render.
-  const replayInitialState: ReplaySpectatorState | null = useMemo(() => {
-    if (!replay) return null;
-    if (replay.initialState) return replay.initialState;
-    if (!replay.finalState) return null;
-    return deriveReplayInitialState(replay.finalState, replayMoves);
-  }, [replay, replayMoves]);
+  // Number of movable steps. `frames[0]` is the initial state so the final
+  // selectable index is `frames.length - 1`. `replayTotal` is kept as that
+  // max index so step/scrub arithmetic can clamp against it directly.
+  const replayTotal = Math.max(0, replayFrames.length - 1);
 
   const availableReplayPlayerIds = useMemo(() => {
-    if (!replay?.finalState?.players) return [] as string[];
-    return replay.finalState.players
-      .map((p: any) => p?.playerId)
-      .filter((id: unknown): id is string => typeof id === 'string' && !!id);
-  }, [replay]);
+    if (!replay || replayFrames.length === 0) return [] as string[];
+    // Prefer the last frame (most complete roster) but fall back across the
+    // whole buffer so an in-progress replay with only early frames still
+    // yields a perspective id.
+    for (let i = replayFrames.length - 1; i >= 0; i -= 1) {
+      const players = (replayFrames[i]?.players ?? []) as Array<{ playerId?: string }>;
+      const ids = players
+        .map((p) => p?.playerId)
+        .filter((id): id is string => typeof id === 'string' && !!id);
+      if (ids.length > 0) return ids;
+    }
+    return [];
+  }, [replay, replayFrames]);
 
   const [replayMoveIndex, setReplayMoveIndex] = useState(0);
   const [replayPlaying, setReplayPlaying] = useState(false);
@@ -2660,7 +2660,7 @@ export function GameBoard({ matchId, playerId, replay, spectator }: GameBoardPro
     setReplaySpeed(replay.speed ?? 1);
     setReplayPerspective(
       replay.perspectivePlayerId ??
-        (replay.finalState?.players?.[0] as any)?.playerId ??
+        (replay.frames?.[0]?.players?.[0] as any)?.playerId ??
         ''
     );
   }, [replay]);
@@ -2679,24 +2679,106 @@ export function GameBoard({ matchId, playerId, replay, spectator }: GameBoardPro
     return () => clearTimeout(timer);
   }, [replayMode, replayPlaying, replayMoveIndex, replayTotal, replaySpeed]);
 
-  // Compute the state at the current move index and push it into the
-  // live-code overrides. Because GameBoard already consumes
-  // `playerOverride` / `spectatorOverride` with highest priority, the rest
-  // of the component renders the replay state exactly like a live match.
+  // Push the selected frame into the live-code overrides. Because GameBoard
+  // already consumes `playerOverride` / `spectatorOverride` with highest
+  // priority, the rest of the component renders the replay frame exactly as
+  // it does a live-subscription payload - same setter, no parallel path.
   useEffect(() => {
-    if (!replay || !replayInitialState) return;
-    const reducedSpectator = replayStateAtMove(
-      replayInitialState,
-      replayMoves,
-      replayMoveIndex
-    );
+    if (!replayMode || replayFrames.length === 0) return;
+    const selected = replayFrameAt(replayFrames, replayMoveIndex);
+    if (!selected) return;
     const reducedPlayer = buildReplayPlayerMatchView(
-      reducedSpectator,
+      selected,
       replayPerspective || null
     );
-    setSpectatorOverride(reducedSpectator as unknown as SpectatorGameState);
+    setSpectatorOverride(selected as unknown as SpectatorGameState);
     setPlayerOverride(reducedPlayer as unknown as PlayerMatchView);
-  }, [replay, replayInitialState, replayMoves, replayMoveIndex, replayPerspective]);
+  }, [replayMode, replayFrames, replayMoveIndex, replayPerspective]);
+
+  // =========================================================================
+  // Spectator mode: frame buffer + pause / scrub
+  // =========================================================================
+  // Append-only buffer of every spectator-shape frame seen on this mount.
+  // When the user pauses, we pin `spectatorOverride` to buffer[index] while
+  // still accepting new frames into the buffer so a scrubber can step
+  // forward through anything that arrived while paused. Capped to avoid
+  // unbounded memory on a long-running watch.
+  const SPECTATOR_BUFFER_MAX = 1000;
+  const [spectatorFrameBuffer, setSpectatorFrameBuffer] = useState<
+    SpectatorGameState[]
+  >([]);
+  const [spectatorPaused, setSpectatorPaused] = useState(false);
+  const [spectatorFrameIndex, setSpectatorFrameIndex] = useState(0);
+  const spectatorPausedRef = useRef(false);
+  useEffect(() => {
+    spectatorPausedRef.current = spectatorPaused;
+  }, [spectatorPaused]);
+
+  // Clear the buffer whenever the viewer switches matches. Replay mode owns
+  // its own pipeline, so only wipe when entering spectator mode.
+  useEffect(() => {
+    if (!spectatorMode) return;
+    setSpectatorFrameBuffer([]);
+    setSpectatorPaused(false);
+    setSpectatorFrameIndex(0);
+  }, [spectatorMode, matchId]);
+
+  // Ingest each subscription tick into the buffer and, while following
+  // live, keep the index on the tail. The subscription is match-scoped and
+  // fires on every engine dispatch (see bot-match.ts:publishSpectatorState).
+  const incomingSpectatorFrame = spectatorSubData?.gameStateChanged;
+  useEffect(() => {
+    if (!spectatorMode || !incomingSpectatorFrame) return;
+    setSpectatorFrameBuffer((prev) => {
+      const next = [...prev, incomingSpectatorFrame as SpectatorGameState];
+      if (next.length > SPECTATOR_BUFFER_MAX) {
+        return next.slice(next.length - SPECTATOR_BUFFER_MAX);
+      }
+      return next;
+    });
+  }, [spectatorMode, incomingSpectatorFrame]);
+
+  // Whenever the buffer grows while the viewer is following live, snap the
+  // index to the tail. We always push the latest frame into the override
+  // setters because GameBoard's loading gate needs `playerView` to be
+  // non-null and the live spectator subscription on its own doesn't
+  // populate the player-scoped override - only the replay-style projection
+  // of the spectator frame does.
+  useEffect(() => {
+    if (!spectatorMode) return;
+    if (spectatorFrameBuffer.length === 0) return;
+    if (spectatorPausedRef.current) return;
+    const latest = spectatorFrameBuffer[spectatorFrameBuffer.length - 1];
+    setSpectatorFrameIndex(spectatorFrameBuffer.length - 1);
+    if (latest) {
+      setSpectatorOverride(latest);
+      const projected = buildReplayPlayerMatchView(
+        latest as unknown as ReplaySpectatorState,
+        playerId || null
+      );
+      setPlayerOverride(projected as unknown as PlayerMatchView);
+    }
+  }, [spectatorMode, spectatorFrameBuffer, playerId]);
+
+  // When paused, drive the render off the selected buffered frame.
+  useEffect(() => {
+    if (!spectatorMode || !spectatorPaused) return;
+    const frame = spectatorFrameBuffer[spectatorFrameIndex];
+    if (!frame) return;
+    setSpectatorOverride(frame);
+    const projected = buildReplayPlayerMatchView(
+      frame as unknown as ReplaySpectatorState,
+      playerId || null
+    );
+    setPlayerOverride(projected as unknown as PlayerMatchView);
+  }, [spectatorMode, spectatorPaused, spectatorFrameBuffer, spectatorFrameIndex, playerId]);
+
+  const spectatorBufferSize = spectatorFrameBuffer.length;
+  const spectatorMaxIndex = Math.max(0, spectatorBufferSize - 1);
+  // `replayMoveIndex` / `replayTotal` work in terms of move-count (0-based
+  // with N moves), so step / scrub arithmetic treats the final index as
+  // `frames.length - 1`. ReplayControls was designed around that contract;
+  // spectator mode reuses the same component with the same contract.
 
   const [battlefieldCountdown, setBattlefieldCountdown] = useState<number | null>(null);
   const [battlefieldAdvanceTriggered, setBattlefieldAdvanceTriggered] = useState(false);
@@ -3448,16 +3530,36 @@ export function GameBoard({ matchId, playerId, replay, spectator }: GameBoardPro
     if (!matchId) {
       return;
     }
+    // Arena-sync forces a refetch of the live match/playerMatch queries. In
+    // replay mode those queries are skipped (liveMatchId === '') but
+    // `refetchMatch()` ignores `skip` and still hits the backend with empty
+    // variables, which 404s and spams the console. Skip the interval
+    // entirely when we're driving the board off a pre-recorded frame list -
+    // there's no live backend state to reconcile with. Spectator mode still
+    // benefits from the sync as a safety net for a dropped subscription.
+    if (replayMode) {
+      return;
+    }
     const syncInterval = setInterval(() => {
       void refreshArenaState();
     }, ARENA_SYNC_INTERVAL_MS);
     return () => clearInterval(syncInterval);
-  }, [matchId, refreshArenaState]);
+  }, [matchId, refreshArenaState, replayMode]);
 
   useEffect(() => {
+    // In replay and spectator modes the overrides are the *source* of
+    // truth - the replay effect and the spectator frame-buffer effect set
+    // them from the authoritative engine frame. Clearing them here would
+    // race those effects on mount and strand GameBoard in the loading
+    // gate, because `playerView`/`spectatorState` would momentarily fall
+    // back to null. The spectator buffer itself is reset by its own
+    // match-scoped effect.
+    if (replayMode || spectatorMode) {
+      return;
+    }
     setPlayerOverride(null);
     setSpectatorOverride(null);
-  }, [matchId]);
+  }, [matchId, replayMode, spectatorMode]);
   useEffect(() => {
     setPlayerSnapshot(null);
     setSpectatorSnapshot(null);
@@ -3473,10 +3575,18 @@ export function GameBoard({ matchId, playerId, replay, spectator }: GameBoardPro
 
   useEffect(() => {
     if (spectatorSubData?.gameStateChanged) {
+      // In spectator mode the frame-buffer effect owns `spectatorOverride`
+      // and `playerOverride` - clearing them here races the buffer write
+      // and flickers the board back into its loading gate on every tick.
+      // The match-level `match` query that `refreshArenaState` refetches
+      // is also redundant with the subscription payload for spectator use.
+      if (spectatorMode) {
+        return;
+      }
       setSpectatorOverride(null);
       void refreshArenaState();
     }
-  }, [refreshArenaState, spectatorSubData?.gameStateChanged]);
+  }, [refreshArenaState, spectatorMode, spectatorSubData?.gameStateChanged]);
 
   useEffect(() => {
     setPlayerDeckOrder((prev) => alignDeckOrder(prev, playerDeckCount, `self-${matchId}`));
@@ -8491,6 +8601,50 @@ export function GameBoard({ matchId, playerId, replay, spectator }: GameBoardPro
           }}
           onSpeedChange={(speed) => setReplaySpeed(speed)}
           onPerspectiveChange={(pid) => setReplayPerspective(pid)}
+        />
+      )}
+      {spectatorMode && spectatorBufferSize > 0 && (
+        <ReplayControls
+          moveIndex={spectatorFrameIndex}
+          totalMoves={spectatorMaxIndex}
+          playing={!spectatorPaused}
+          speed={1}
+          currentPhase={spectatorOverride?.currentPhase ?? spectatorState?.currentPhase ?? ''}
+          turnNumber={spectatorOverride?.turnNumber ?? spectatorState?.turnNumber ?? 0}
+          perspectivePlayerId={playerId || null}
+          availablePlayerIds={[]}
+          onPlayPauseToggle={() => {
+            setSpectatorPaused((prev) => {
+              const next = !prev;
+              if (!next) {
+                setSpectatorFrameIndex(Math.max(0, spectatorFrameBuffer.length - 1));
+                setSpectatorOverride(null);
+              }
+              return next;
+            });
+          }}
+          onStep={(delta) => {
+            setSpectatorPaused(true);
+            setSpectatorFrameIndex((prev) =>
+              Math.max(0, Math.min(spectatorMaxIndex, prev + delta))
+            );
+          }}
+          onScrub={(index) => {
+            setSpectatorPaused(true);
+            setSpectatorFrameIndex(Math.max(0, Math.min(spectatorMaxIndex, index)));
+          }}
+          onSpeedChange={() => {
+            // Live spectate has no playback multiplier: frames arrive at
+            // engine cadence. Keep this a no-op so ReplayControls' speed
+            // buttons remain a visual constant rather than introducing a
+            // second "replay" loop that could diverge from the subscription.
+          }}
+          onPerspectiveChange={() => {
+            // No perspective switch in spectator mode yet - both players'
+            // hands are already visible in the serialized spectator frame,
+            // so there is nothing to swap. Hiding the dropdown by passing
+            // an empty `availablePlayerIds` keeps the control from rendering.
+          }}
         />
       )}
     </div>
