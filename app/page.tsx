@@ -8,24 +8,45 @@ import Header from '@/components/Header'
 import Footer from '@/components/Footer'
 import { useStartBotMatch } from '@/hooks/useGraphQL'
 
+// Backend BE-5 asserts these are the five strategies the engine supports
+// (StartBotMatchResult.availableStrategies). We seed the dropdowns with the
+// same five so the page works before the first mutation completes, and we
+// replace the list from the response on submit so a future backend change
+// (new strategy added, old one removed) flows through without a code change.
+const DEFAULT_STRATEGIES = ['baseline', 'heuristic', 'random', 'aggro', 'control'] as const
+const DEFAULT_STRATEGY_A = 'aggro'
+const DEFAULT_STRATEGY_B = 'control'
+
 export default function Home() {
   const router = useRouter()
   const [startBotMatch, { loading: startingBotMatch }] = useStartBotMatch()
   const [botError, setBotError] = useState<string | null>(null)
+  const [strategyA, setStrategyA] = useState<string>(DEFAULT_STRATEGY_A)
+  const [strategyB, setStrategyB] = useState<string>(DEFAULT_STRATEGY_B)
+  const [availableStrategies, setAvailableStrategies] = useState<string[]>([
+    ...DEFAULT_STRATEGIES,
+  ])
 
   const handleStartBotMatch = async () => {
     setBotError(null)
     try {
       const { data } = await startBotMatch({
         variables: {
-          strategyA: 'aggro',
-          strategyB: 'control',
+          strategyA,
+          strategyB,
         },
       })
       const payload = data?.startBotMatch
-      const spectatorPath: string | undefined =
-        payload?.spectatorPath ||
-        (payload?.matchId ? `/game/${encodeURIComponent(payload.matchId)}` : undefined)
+      // Replace the dropdown options from the backend's reply so any future
+      // change to the supported strategy list is reflected here without a
+      // frontend redeploy. Defaults stay if the field is missing.
+      if (Array.isArray(payload?.availableStrategies) && payload.availableStrategies.length > 0) {
+        setAvailableStrategies(payload.availableStrategies)
+      }
+      // Trust the backend's spectatorPath. BE-3 made this canonical
+      // (/spectate/<matchId>); the old /game/<matchId> fallback would
+      // re-introduce the participant-only-view bug (spec D1) so it is gone.
+      const spectatorPath: string | undefined = payload?.spectatorPath
       if (!spectatorPath) {
         setBotError('Bot match could not be started.')
         return
@@ -64,9 +85,41 @@ export default function Home() {
                   onClick={handleStartBotMatch}
                   disabled={startingBotMatch}
                 >
-                  {startingBotMatch ? 'Starting bots...' : 'Start bot match'}
+                  {startingBotMatch ? 'Starting bot vs bot...' : 'Start Bot vs Bot'}
                 </button>
               </p>
+              <div className="bot-strategy-pickers" style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center', marginTop: '0.5rem' }}>
+                <label style={{ display: 'inline-flex', flexDirection: 'column', gap: '0.25rem' }}>
+                  <span className="muted small">Bot A</span>
+                  <select
+                    value={strategyA}
+                    onChange={(event) => setStrategyA(event.target.value)}
+                    disabled={startingBotMatch}
+                    aria-label="Bot A strategy"
+                  >
+                    {availableStrategies.map((value) => (
+                      <option key={`a-${value}`} value={value}>
+                        {value}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label style={{ display: 'inline-flex', flexDirection: 'column', gap: '0.25rem' }}>
+                  <span className="muted small">Bot B</span>
+                  <select
+                    value={strategyB}
+                    onChange={(event) => setStrategyB(event.target.value)}
+                    disabled={startingBotMatch}
+                    aria-label="Bot B strategy"
+                  >
+                    {availableStrategies.map((value) => (
+                      <option key={`b-${value}`} value={value}>
+                        {value}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
               {botError && (
                 <p className="muted small" aria-live="polite">
                   {botError}
