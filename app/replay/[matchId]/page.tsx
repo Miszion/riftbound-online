@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { usePathname, useSearchParams } from 'next/navigation'
 import RequireAuth from '@/components/auth/RequireAuth'
 import GameBoard from '@/components/GameBoard'
+import ReplayDrawer from '@/components/ReplayDrawer'
 import LoadingSpinner from '@/components/ui/LoadingSpinner'
 import { useAuth } from '@/hooks/useAuth'
 import { useMatchReplay } from '@/hooks/useGraphQL'
@@ -95,51 +96,43 @@ function ReplayPageContent() {
     return () => clearTimeout(timer)
   }, [shouldPoll, refetch, data])
 
-  if (!matchId) {
-    return (
-      <main className="game-screen container">
+  // Pick the inner view based on load/error/polling state. The surrounding
+  // <main> + ReplayDrawer stay constant so the drawer is always available,
+  // including during the 10s fresh-match polling window.
+  const inner = (() => {
+    if (!matchId) {
+      return (
         <div className="queue-waiting" aria-live="polite">
           <strong>No replay selected</strong>
           <span>Open a replay link with a valid match ID to get started.</span>
         </div>
-      </main>
-    )
-  }
-
-  if (loading && !replayRecord) {
-    return (
-      <main className="game-screen container">
+      )
+    }
+    if (loading && !replayRecord) {
+      return (
         <div className="loading-overlay" aria-live="polite">
           <LoadingSpinner size="lg" />
         </div>
-      </main>
-    )
-  }
-
-  if (error) {
-    return (
-      <main className="game-screen container">
+      )
+    }
+    if (error) {
+      return (
         <div className="queue-waiting" aria-live="polite">
           <strong>Unable to load replay.</strong>
           <span>{error.message}</span>
         </div>
-      </main>
-    )
-  }
-
-  if (!replayRecord || !replayRecord.finalState) {
-    if (!gaveUpPolling && elapsed < 10_000) {
-      return (
-        <main className="game-screen container">
+      )
+    }
+    if (!replayRecord || !replayRecord.finalState) {
+      if (!gaveUpPolling && elapsed < 10_000) {
+        return (
           <div className="loading-overlay" aria-live="polite">
             <LoadingSpinner size="lg" />
             <span>Preparing replay...</span>
           </div>
-        </main>
-      )
-    }
-    return (
-      <main className="game-screen container">
+        )
+      }
+      return (
         <div className="queue-waiting" aria-live="polite">
           <strong>Replay not available.</strong>
           <span>
@@ -147,26 +140,24 @@ function ReplayPageContent() {
             missing.
           </span>
         </div>
-      </main>
-    )
-  }
+      )
+    }
 
-  // Default perspective: the viewer's own id if they were a participant,
-  // otherwise the first player in the record.
-  const finalState = replayRecord.finalState as ReplaySpectatorState
-  const moves = (replayRecord.moves ?? []) as ReplayMove[]
-  const participants: string[] = Array.isArray(replayRecord.players)
-    ? replayRecord.players
-    : []
-  const perspectivePlayerId =
-    (user?.userId && participants.includes(user.userId)
-      ? user.userId
-      : participants[0]) ?? undefined
+    // Default perspective: the viewer's own id if they were a participant,
+    // otherwise the first player in the record.
+    const finalState = replayRecord.finalState as ReplaySpectatorState
+    const moves = (replayRecord.moves ?? []) as ReplayMove[]
+    const participants: string[] = Array.isArray(replayRecord.players)
+      ? replayRecord.players
+      : []
+    const perspectivePlayerId =
+      (user?.userId && participants.includes(user.userId)
+        ? user.userId
+        : participants[0]) ?? undefined
 
-  // We pass a non-empty `matchId` + `playerId` for type compatibility, but
-  // `replay` short-circuits every live hook inside GameBoard.
-  return (
-    <main className="game-screen container">
+    // We pass a non-empty `matchId` + `playerId` for type compatibility, but
+    // `replay` short-circuits every live hook inside GameBoard.
+    return (
       <div className="game-screen__board">
         <GameBoard
           matchId={matchId}
@@ -179,6 +170,13 @@ function ReplayPageContent() {
           }}
         />
       </div>
+    )
+  })()
+
+  return (
+    <main className="game-screen container">
+      {inner}
+      <ReplayDrawer currentMatchId={matchId || null} />
     </main>
   )
 }
