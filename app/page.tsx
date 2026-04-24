@@ -4,10 +4,15 @@ import { useState } from 'react'
 import Link from 'next/link'
 import Image from 'next/image'
 import { useRouter } from 'next/navigation'
+import { useMutation } from '@apollo/client'
 import Header from '@/components/Header'
 import Footer from '@/components/Footer'
 import ReplayDrawer from '@/components/ReplayDrawer'
-import { useStartBotMatch } from '@/hooks/useGraphQL'
+import { useActiveBotMatches, useStartBotMatch } from '@/hooks/useGraphQL'
+import {
+  CANCEL_BOT_MATCH,
+  CANCEL_ALL_BOT_MATCHES,
+} from '@/lib/graphql/queries'
 
 // Backend BE-5 asserts these are the five strategies the engine supports
 // (StartBotMatchResult.availableStrategies). We seed the dropdowns with the
@@ -17,6 +22,15 @@ import { useStartBotMatch } from '@/hooks/useGraphQL'
 const DEFAULT_STRATEGIES = ['baseline', 'heuristic', 'random', 'aggro', 'control'] as const
 const DEFAULT_STRATEGY_A = 'aggro'
 const DEFAULT_STRATEGY_B = 'control'
+
+interface BotMatchSummary {
+  matchId: string
+  players: string[]
+  strategies: string[]
+  status: string
+  winner: string | null
+  reason: string | null
+}
 
 export default function Home() {
   const router = useRouter()
@@ -28,6 +42,15 @@ export default function Home() {
     ...DEFAULT_STRATEGIES,
   ])
 
+  const { data: activeData, refetch: refetchActive } = useActiveBotMatches({ pollMs: 4000 })
+
+  const [cancelBotMatch, { loading: cancelling }] = useMutation<{
+    cancelBotMatch: boolean
+  }>(CANCEL_BOT_MATCH)
+  const [cancelAllBotMatches, { loading: cancellingAll }] = useMutation<{
+    cancelAllBotMatches: number
+  }>(CANCEL_ALL_BOT_MATCHES)
+
   const handleStartBotMatch = async () => {
     setBotError(null)
     try {
@@ -38,9 +61,6 @@ export default function Home() {
         },
       })
       const payload = data?.startBotMatch
-      // Replace the dropdown options from the backend's reply so any future
-      // change to the supported strategy list is reflected here without a
-      // frontend redeploy. Defaults stay if the field is missing.
       if (Array.isArray(payload?.availableStrategies) && payload.availableStrategies.length > 0) {
         setAvailableStrategies(payload.availableStrategies)
       }
@@ -52,6 +72,7 @@ export default function Home() {
         setBotError('Bot match could not be started.')
         return
       }
+      await refetchActive()
       router.push(spectatorPath)
     } catch (error) {
       const message =
@@ -59,6 +80,32 @@ export default function Home() {
       setBotError(message)
     }
   }
+
+  const handleCancel = async (matchId: string) => {
+    try {
+      await cancelBotMatch({ variables: { matchId } })
+      await refetchActive()
+    } catch (err) {
+      console.error('cancelBotMatch failed', err)
+    }
+  }
+
+  const handleCancelAll = async () => {
+    try {
+      await cancelAllBotMatches()
+      await refetchActive()
+    } catch (err) {
+      console.error('cancelAllBotMatches failed', err)
+    }
+  }
+
+  const summaries: BotMatchSummary[] = activeData?.activeBotMatches ?? []
+  const activeMatches = summaries.filter(
+    (m) => m.status === 'running' || m.status === 'initializing'
+  )
+  const recentlyFinished = summaries
+    .filter((m) => m.status === 'completed' || m.status === 'crashed')
+    .slice(0, 5)
 
   return (
     <>
@@ -165,6 +212,147 @@ export default function Home() {
           </div>
         </section>
 
+        <section className="container" style={{ padding: '32px 0' }}>
+          <div
+            style={{
+              border: '1px solid rgba(255, 255, 255, 0.08)',
+              borderRadius: 12,
+              padding: 24,
+              background: 'rgba(255, 255, 255, 0.02)',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 12,
+                flexWrap: 'wrap',
+                marginBottom: 8,
+              }}
+            >
+              <h4 style={{ margin: 0 }}>
+                Active bot matches{' '}
+                <span style={{ opacity: 0.6, fontWeight: 400, fontSize: '0.85em' }}>
+                  ({activeMatches.length})
+                </span>
+              </h4>
+              {activeMatches.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={handleCancelAll}
+                  disabled={cancellingAll}
+                  style={{
+                    fontSize: 12,
+                    padding: '6px 12px',
+                    borderRadius: 6,
+                    border: '1px solid rgba(255, 136, 136, 0.5)',
+                    background: 'transparent',
+                    color: '#ff8888',
+                    cursor: cancellingAll ? 'wait' : 'pointer',
+                    opacity: cancellingAll ? 0.7 : 1,
+                  }}
+                >
+                  {cancellingAll ? 'Cancelling...' : `Cancel all (${activeMatches.length})`}
+                </button>
+              ) : null}
+            </div>
+            {activeMatches.length === 0 ? (
+              <p style={{ opacity: 0.7, margin: 0 }}>
+                No bot matches running right now. Start one above.
+              </p>
+            ) : (
+              <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 8 }}>
+                {activeMatches.map((m) => (
+                  <li
+                    key={m.matchId}
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 12,
+                      padding: '10px 14px',
+                      border: '1px solid rgba(255, 255, 255, 0.08)',
+                      borderRadius: 8,
+                      background: 'rgba(255, 255, 255, 0.03)',
+                    }}
+                  >
+                    <div style={{ display: 'grid', gap: 2 }}>
+                      <strong style={{ fontFamily: 'monospace', fontSize: 13 }}>{m.matchId}</strong>
+                      <span style={{ fontSize: 12, opacity: 0.75 }}>
+                        {m.strategies.join(' vs ')} - status {m.status}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <Link
+                        className="cta"
+                        href={`/spectate/${encodeURIComponent(m.matchId)}`}
+                        style={{ fontSize: 13, padding: '6px 12px' }}
+                      >
+                        Spectate
+                      </Link>
+                      <button
+                        type="button"
+                        onClick={() => handleCancel(m.matchId)}
+                        disabled={cancelling}
+                        style={{
+                          fontSize: 12,
+                          padding: '6px 10px',
+                          borderRadius: 6,
+                          border: '1px solid rgba(255, 136, 136, 0.5)',
+                          background: 'transparent',
+                          color: '#ff8888',
+                          cursor: cancelling ? 'wait' : 'pointer',
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {recentlyFinished.length > 0 ? (
+              <details style={{ marginTop: 16 }}>
+                <summary style={{ cursor: 'pointer', opacity: 0.8 }}>
+                  Recently finished ({recentlyFinished.length})
+                </summary>
+                <ul style={{ listStyle: 'none', padding: 0, marginTop: 8, display: 'grid', gap: 6 }}>
+                  {recentlyFinished.map((m) => (
+                    <li
+                      key={m.matchId}
+                      style={{
+                        padding: '8px 12px',
+                        border: '1px solid rgba(255, 255, 255, 0.06)',
+                        borderRadius: 6,
+                        fontSize: 12,
+                        opacity: 0.85,
+                        display: 'flex',
+                        gap: 8,
+                        flexWrap: 'wrap',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <span style={{ fontFamily: 'monospace' }}>{m.matchId}</span>
+                      <span>
+                        {m.status} - winner: {m.winner ?? 'n/a'} - {m.reason ?? ''}
+                      </span>
+                      <Link
+                        href={`/replay/${encodeURIComponent(m.matchId)}`}
+                        style={{ color: 'inherit', textDecoration: 'underline' }}
+                      >
+                        replay
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
+          </div>
+        </section>
+
         <section className="features container">
           <h3>Features</h3>
           <div className="grid">
@@ -185,9 +373,7 @@ export default function Home() {
       </main>
       {/* Recent-matches drawer. Clicking a completed match routes to
           /replay/<id>, which renders the persisted engine frames on the
-          real GameBoard via setSpectatorOverride. The drawer itself was
-          shipped in PR #1 ("mount replay drawer inside the gameboard");
-          mounting it here brings the same entry point to the homepage. */}
+          real GameBoard via setSpectatorOverride. */}
       <ReplayDrawer />
       <Footer />
     </>

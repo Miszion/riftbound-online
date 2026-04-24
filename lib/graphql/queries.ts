@@ -1562,3 +1562,15 @@ export const START_BOT_MATCH = gql`
     }
   }
 `;
+
+export const CANCEL_BOT_MATCH = gql`
+  mutation CancelBotMatch($matchId: ID!) {
+    cancelBotMatch(matchId: $matchId)
+  }
+`;
+
+export const CANCEL_ALL_BOT_MATCHES = gql`
+  mutation CancelAllBotMatches {
+    cancelAllBotMatches
+  }
+`;
