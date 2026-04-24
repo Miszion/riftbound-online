@@ -12,6 +12,8 @@ import {
   PLAY_CARD,
   ATTACK,
   MOVE_UNIT,
+  HIDE_CARD,
+  ACTIVATE_HIDDEN_CARD,
   COMMENCE_BATTLE,
   NEXT_PHASE,
   RECORD_DUEL_LOG_ENTRY,
@@ -30,7 +32,10 @@ import {
   JOIN_MATCHMAKING_QUEUE,
   LEAVE_MATCHMAKING_QUEUE,
   GET_MATCH_REPLAY,
+  GET_MATCH_FRAMES,
+  GET_ACTIVE_BOT_MATCHES,
   GET_RECENT_MATCHES,
+  START_BOT_MATCH,
   SUBMIT_MULLIGAN,
   SUBMIT_DISCARD_SELECTION,
   SUBMIT_TARGET_SELECTION,
@@ -143,6 +148,14 @@ export function useAttack() {
 
 export function useMoveUnit() {
   return useMutation(MOVE_UNIT);
+}
+
+export function useHideCard() {
+  return useMutation(HIDE_CARD);
+}
+
+export function useActivateHiddenCard() {
+  return useMutation(ACTIVATE_HIDDEN_CARD);
 }
 
 export function useCommenceBattle() {
@@ -271,10 +284,41 @@ export function useMatchReplay(matchId: string | null) {
   });
 }
 
+// Persistent per-move frames from backend replay-frame-store. A completed
+// match returns `frames.length === moveHistory.length + 1` (initial + one per
+// move). Null matchId skips the query; the `variables` preserve the same
+// shape so the skip guard is the only gate.
+export function useMatchFrames(
+  matchId: string | null,
+  options: { offset?: number; limit?: number } = {}
+) {
+  return useQuery(GET_MATCH_FRAMES, {
+    variables: {
+      matchId: matchId || '',
+      offset: options.offset,
+      limit: options.limit,
+    },
+    skip: !matchId,
+  });
+}
+
 export function useRecentMatches(limit = 10) {
   return useQuery(GET_RECENT_MATCHES, {
     variables: { limit },
   });
+}
+
+// Live list of bot-vs-bot matches (in-progress + recently completed). The
+// spectate page filters this client-side to find the strategy pairing for
+// the match being watched.
+export function useActiveBotMatches(options: { pollMs?: number } = {}) {
+  return useQuery(GET_ACTIVE_BOT_MATCHES, {
+    pollInterval: options.pollMs,
+  });
+}
+
+export function useStartBotMatch() {
+  return useMutation(START_BOT_MATCH);
 }
 
 // ============================================================================

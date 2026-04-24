@@ -4,6 +4,7 @@ import { useEffect, useMemo } from 'react'
 import { usePathname, useSearchParams } from 'next/navigation'
 import RequireAuth from '@/components/auth/RequireAuth'
 import GameBoard from '@/components/GameBoard'
+import ReplayDrawer from '@/components/ReplayDrawer'
 import { useAuth } from '@/hooks/useAuth'
 
 export default function GamePage() {
@@ -51,6 +52,7 @@ function GamePageContent() {
           <strong>Awaiting match context…</strong>
           <span>Join the queue or open an existing arena link to start a duel.</span>
         </div>
+        <ReplayDrawer currentMatchId={matchId || null} />
       </main>
     )
   }
@@ -60,6 +62,7 @@ function GamePageContent() {
       <div className="game-screen__board">
         <GameBoard matchId={matchId} playerId={user.userId} />
       </div>
+      <ReplayDrawer currentMatchId={matchId} />
     </main>
   )
 }

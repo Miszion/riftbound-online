@@ -15,6 +15,7 @@ export default function Header() {
   const navLinks = user
     ? [
         { href: '/matchmaking', label: 'Matchmaking' },
+        { href: '/history', label: 'Matches' },
         { href: '/spectate', label: 'Spectate' },
         { href: '/deckbuilder', label: 'Deckbuilder' },
       ]

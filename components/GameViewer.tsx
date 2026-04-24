@@ -21,6 +21,13 @@ type SpectatorCard = {
   type?: string
   power?: number
   toughness?: number
+  slug?: string
+  code?: string
+  image?: string
+  assets?: {
+    remote?: string | null
+    localPath?: string
+  }
 }
 
 type SpectatorBoard = {
@@ -67,9 +74,30 @@ const cardMetaLookup = (
   catalogIndex?: Record<string, CatalogCard>,
 ) => {
   if (!catalogIndex) return undefined
+  const keys = [
+    card.cardId,
+    card.slug,
+    card.code,
+    card.name,
+  ]
+  for (const key of keys) {
+    if (typeof key !== 'string' || !key) continue
+    const hit = catalogIndex[key] || catalogIndex[key.toLowerCase()]
+    if (hit) return hit
+  }
+  return undefined
+}
+
+const resolveCardArt = (
+  card: SpectatorCard,
+  meta?: CatalogCard,
+): string | undefined => {
   return (
-    catalogIndex[card.cardId] ||
-    catalogIndex[card.name.toLowerCase()] ||
+    meta?.assets?.remote ||
+    meta?.assets?.localPath ||
+    card.assets?.remote ||
+    card.assets?.localPath ||
+    card.image ||
     undefined
   )
 }
@@ -246,21 +274,31 @@ function ZoneDisplay({
       <div className={`zone-cards ${compact ? 'compact' : ''}`}>
         {cards.map((card, index) => {
           const meta = cardMetaLookup(card, catalogIndex)
+          const artUrl = resolveCardArt(card, meta)
+          const missingMeta = !meta && !artUrl
           return (
             <div
               key={`${card.cardId}-${card.name}-${index}`}
-              className={`card-visual ${rarityClass(meta)}`}
+              className={`card-visual ${rarityClass(meta)} ${
+                missingMeta ? 'card-visual--placeholder' : ''
+              }`}
             >
               <div
                 className="card-art"
                 style={
-                  meta?.assets?.remote
+                  artUrl
                     ? {
-                        backgroundImage: `url(${meta.assets.remote})`,
+                        backgroundImage: `url(${artUrl})`,
                       }
                     : undefined
                 }
-              />
+              >
+                {missingMeta && (
+                  <span className="card-art__placeholder">
+                    {card.name || card.cardId || 'Unknown card'}
+                  </span>
+                )}
+              </div>
               <div className="card-info">
                 <strong>{card.name}</strong>
                 <span className="muted small">

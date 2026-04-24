@@ -18,6 +18,8 @@ import {
   usePlayerGameStateSubscription,
   usePlayCard,
   useMoveUnit,
+  useHideCard,
+  useActivateHiddenCard,
   useCommenceBattle,
   useNextPhase,
   useConcedeMatch,
@@ -39,6 +41,12 @@ import {
 import type { ToastTone } from '@/components/ui/ToastStack';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import useToasts from '@/hooks/useToasts';
+import ReplayControls from '@/components/ReplayControls';
+import {
+  buildPlayerMatchView as buildReplayPlayerMatchView,
+  frameAt as replayFrameAt,
+  type ReplaySpectatorState,
+} from '@/lib/replay/reducer';
 import doransBladeImg from '@/public/images/dorans-blade.jpg';
 import doransShieldImg from '@/public/images/dorans-shield.jpg';
 import doransRingImg from '@/public/images/dorans-ring.jpg';
@@ -606,6 +614,15 @@ type BattlefieldPresence = {
   unitCount: number;
 };
 
+type HiddenCardState = {
+  instanceId: string;
+  ownerId: string;
+  hiddenOnTurn: number;
+  battlefieldId: string;
+  card?: BaseCard | null;
+  isRevealed: boolean;
+};
+
 type BattlefieldState = {
   battlefieldId: string;
   slug?: string | null;
@@ -621,6 +638,7 @@ type BattlefieldState = {
   effectState?: Record<string, unknown> | null;
   card?: CardSnapshotLike | BaseCard | null;
   presence?: BattlefieldPresence[] | null;
+  hiddenCards?: HiddenCardState[] | null;
 };
 
 type BattlefieldPromptOption = {
@@ -699,9 +717,40 @@ type SpectatorGameState = {
   reactionChain?: ReactionChain | null;
 };
 
+/**
+ * Replay mode input. When supplied, GameBoard bypasses every live hook (no
+ * subscriptions, no mutations) and drives its display off a pre-recorded
+ * list of engine-serialized frames fetched from the `matchFrames` GraphQL
+ * query. Each frame is the exact spectator-shape snapshot the engine
+ * publishes in live play, so the replay path and the live path share a
+ * single renderer - no client-side mini-engine.
+ */
+export interface ReplayInput {
+  /**
+   * Ordered list of per-move `SerializedFrame`s from the persistent replay-
+   * frame store. `frames[0]` is the initial state, `frames[i]` is the state
+   * after move `i - 1`. Expect `frames.length === moveHistory.length + 1`
+   * for a completed match.
+   */
+  frames: import('@/lib/replay/reducer').ReplaySpectatorState[];
+  /** Multiplier applied to the default 600ms tick interval. Default 1. */
+  speed?: number;
+  /** Which player's hand to reveal. Default: first player. */
+  perspectivePlayerId?: string;
+}
+
 interface GameBoardProps {
   matchId: string;
   playerId: string;
+  /** When set, board renders in replay-only mode. See {@link ReplayInput}. */
+  replay?: ReplayInput;
+  /**
+   * When true, board renders as a live spectator: subscription/query stay
+   * active for the given matchId, but all mutations are no-ops and
+   * participant-only modals (mulligan, discard, target, initiative,
+   * battlefield picker, spell reaction, etc.) stay hidden.
+   */
+  spectator?: boolean;
 }
 
 export default GameBoard;
@@ -1026,6 +1075,14 @@ const cardSupportsCombatTiming = (
     return false;
   }
   const normalized = timing === 'reaction' ? 'reaction' : 'action';
+  
+  // Check activationProfile.timing first (most accurate)
+  const activationTiming = (card as { activationProfile?: { timing?: string } })?.activationProfile?.timing?.toLowerCase();
+  if (activationTiming === normalized) {
+    return true;
+  }
+  
+  // Fall back to keyword check
   return (
     card.keywords?.some((entry) => entry?.toLowerCase().includes(normalized)) ??
     cardHasKeyword(card, normalized)
@@ -1171,6 +1228,8 @@ interface CardTileProps {
   onDragEnd?: (event: React.DragEvent<HTMLDivElement>) => void;
   title?: string;
   onHover?: CardHoverHandler;
+  /** Force the card to display upright regardless of its tapped state */
+  forceUntapped?: boolean;
 }
 
 const CardTile: React.FC<CardTileProps> = ({
@@ -1187,13 +1246,14 @@ const CardTile: React.FC<CardTileProps> = ({
   onDragEnd,
   title,
   onHover,
+  forceUntapped,
 }) => {
   const image = getCardImage(card);
   const rarityColor =
     RARITY_COLORS[card?.rarity?.toLowerCase() ?? ''] ?? '#475569';
   const statsAvailable =
     card?.power !== undefined && card?.toughness !== undefined;
-  const isTapped = Boolean(card?.isTapped ?? card?.tapped);
+  const isTapped = forceUntapped ? false : Boolean(card?.isTapped ?? card?.tapped);
   const isTokenCard = isTokenCardEntity(card);
   const hoverOptions = isTapped ? { displayUntapped: true } : undefined;
   const inlineStyle = useMemo<React.CSSProperties>(() => {
@@ -2145,7 +2205,7 @@ const TargetSelectionModal = ({
                     onClick={handleClick}
                     disabled={disabled}
                   >
-                    <CardTile card={card} widthPx={165} selectable={!disabled} isSelected={isSelected} />
+                    <CardTile card={card} widthPx={165} selectable={!disabled} isSelected={isSelected} forceUntapped />
                     <span className="mulligan-card-button__tag">
                       {isSelected ? 'Selected' : 'Target'}
                     </span>
@@ -2399,32 +2459,66 @@ const MatchResultOverlay = ({
   opponentName,
   reasonLabel,
   onReturn,
+  onWatchReplay,
+  onViewHistory,
+  spectator,
+  winnerName,
 }: {
   didWin: boolean;
   opponentName: string;
   reasonLabel: string;
-  onReturn: () => void;
+  onReturn?: () => void;
+  onWatchReplay?: () => void;
+  onViewHistory?: () => void;
+  spectator?: boolean;
+  winnerName?: string | null;
 }) => (
   <div
     className={[
       'match-result-overlay',
-      didWin ? 'match-result-overlay--win' : 'match-result-overlay--loss',
+      spectator
+        ? 'match-result-overlay--neutral'
+        : didWin
+          ? 'match-result-overlay--win'
+          : 'match-result-overlay--loss',
     ]
       .filter(Boolean)
       .join(' ')}
   >
-    {didWin ? <ConfettiBurst /> : <RaindropShower />}
+    {!spectator && (didWin ? <ConfettiBurst /> : <RaindropShower />)}
     <div className="match-result-overlay__panel" role="dialog" aria-modal="true">
-      <h3>{didWin ? 'Victory!' : 'Defeat'}</h3>
+      <h3>{spectator ? 'Match Complete' : didWin ? 'Victory!' : 'Defeat'}</h3>
       <p>
-        {didWin
-          ? `You triumphed over ${opponentName}.`
-          : `${opponentName} has claimed this duel.`}
+        {spectator
+          ? winnerName
+            ? `${winnerName} has claimed this duel.`
+            : 'The duel has concluded.'
+          : didWin
+            ? `You triumphed over ${opponentName}.`
+            : `${opponentName} has claimed this duel.`}
       </p>
       <p className="match-result-overlay__reason">Reason: {reasonLabel}</p>
-      <button type="button" className="prompt-button primary" onClick={onReturn}>
-        Return to Matchmaking
-      </button>
+      <div className="match-result-overlay__actions">
+        {!spectator && onReturn && (
+          <button type="button" className="prompt-button primary" onClick={onReturn}>
+            Return to Matchmaking
+          </button>
+        )}
+        {onWatchReplay && (
+          <button
+            type="button"
+            className={spectator ? 'prompt-button primary' : 'prompt-button'}
+            onClick={onWatchReplay}
+          >
+            Watch Replay
+          </button>
+        )}
+        {onViewHistory && (
+          <button type="button" className="prompt-button" onClick={onViewHistory}>
+            Match History
+          </button>
+        )}
+      </div>
     </div>
   </div>
 );
@@ -2450,31 +2544,50 @@ const isMatchNotFoundError = (error?: ApolloError | null) => {
   );
 };
 
-export function GameBoard({ matchId, playerId }: GameBoardProps) {
+export function GameBoard({ matchId, playerId, replay, spectator }: GameBoardProps) {
+  // In replay mode we must NEVER open live subscriptions or fire mutations.
+  // Passing an empty string to the GraphQL hooks triggers their `skip` guard,
+  // so no network calls are made. Mutations are also neutered below via
+  // `replayMode` so any accidental call site resolves to a no-op promise.
+  //
+  // In spectator mode we DO want the live match query + subscription to fire
+  // (so a non-participant can watch bot matches in real time), but we still
+  // want every mutation and every player-input modal disabled. To do that we
+  // keep `liveMatchId = matchId` but zero out `livePlayerId` so the
+  // player-scoped subscription and player-scoped query are skipped, and we
+  // gate each mutation call site with `replayMode || spectatorMode`.
+  const replayMode = Boolean(replay);
+  const spectatorMode = Boolean(spectator) && !replayMode;
+  const liveMatchId = replayMode ? '' : matchId;
+  const livePlayerId = replayMode || spectatorMode ? '' : playerId;
+
   const {
     data: basePlayerData,
     loading: playerLoading,
     error: playerError,
     refetch: refetchPlayerMatch,
-  } = usePlayerMatch(matchId, playerId);
+  } = usePlayerMatch(liveMatchId, livePlayerId);
   const {
     data: baseSpectatorData,
     loading: spectatorLoading,
     error: spectatorError,
     refetch: refetchMatch,
-  } = useMatch(matchId);
+  } = useMatch(liveMatchId);
 
   const { data: playerSubData } = usePlayerGameStateSubscription(
-    matchId,
-    playerId
+    liveMatchId,
+    livePlayerId
   );
-  const { data: spectatorSubData } = useGameStateSubscription(matchId);
-  const { data: cardPlayedData } = useCardPlayedSubscription(matchId);
-  const { data: attackDeclaredData } = useAttackDeclaredSubscription(matchId);
-  const { data: phaseChangedData } = usePhaseChangedSubscription(matchId);
+  const { data: spectatorSubData } = useGameStateSubscription(liveMatchId);
+  const { data: cardPlayedData } = useCardPlayedSubscription(liveMatchId);
+  const { data: attackDeclaredData } =
+    useAttackDeclaredSubscription(liveMatchId);
+  const { data: phaseChangedData } = usePhaseChangedSubscription(liveMatchId);
 
   const [playCard, { loading: playingCard }] = usePlayCard();
   const [moveUnit, { loading: movingUnit }] = useMoveUnit();
+  const [hideCardMutation, { loading: hidingCard }] = useHideCard();
+  const [activateHiddenCardMutation, { loading: activatingHiddenCard }] = useActivateHiddenCard();
   const [commenceBattleMutation, { loading: commencingBattle }] = useCommenceBattle();
   const [nextPhase, { loading: advancingPhase }] = useNextPhase();
   const [concedeMatch] = useConcedeMatch();
@@ -2500,6 +2613,173 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const router = useRouter();
   const [playerOverride, setPlayerOverride] = useState<PlayerMatchView | null>(null);
   const [spectatorOverride, setSpectatorOverride] = useState<SpectatorGameState | null>(null);
+
+  // =========================================================================
+  // Replay mode: frame index over a pre-recorded engine timeline
+  // =========================================================================
+  const replayFrames: ReplaySpectatorState[] = useMemo(
+    () => (replay?.frames ?? []) as ReplaySpectatorState[],
+    [replay]
+  );
+  // Number of movable steps. `frames[0]` is the initial state so the final
+  // selectable index is `frames.length - 1`. `replayTotal` is kept as that
+  // max index so step/scrub arithmetic can clamp against it directly.
+  const replayTotal = Math.max(0, replayFrames.length - 1);
+
+  const availableReplayPlayerIds = useMemo(() => {
+    if (!replay || replayFrames.length === 0) return [] as string[];
+    // Prefer the last frame (most complete roster) but fall back across the
+    // whole buffer so an in-progress replay with only early frames still
+    // yields a perspective id.
+    for (let i = replayFrames.length - 1; i >= 0; i -= 1) {
+      const players = (replayFrames[i]?.players ?? []) as Array<{ playerId?: string }>;
+      const ids = players
+        .map((p) => p?.playerId)
+        .filter((id): id is string => typeof id === 'string' && !!id);
+      if (ids.length > 0) return ids;
+    }
+    return [];
+  }, [replay, replayFrames]);
+
+  const [replayMoveIndex, setReplayMoveIndex] = useState(0);
+  const [replayPlaying, setReplayPlaying] = useState(false);
+  const [replaySpeed, setReplaySpeed] = useState<number>(replay?.speed ?? 1);
+  const [replayPerspective, setReplayPerspective] = useState<string>(
+    () =>
+      replay?.perspectivePlayerId ??
+      availableReplayPlayerIds[0] ??
+      playerId ??
+      ''
+  );
+
+  // Reset playback whenever a new replay is loaded.
+  useEffect(() => {
+    if (!replay) return;
+    setReplayMoveIndex(0);
+    setReplayPlaying(false);
+    setReplaySpeed(replay.speed ?? 1);
+    setReplayPerspective(
+      replay.perspectivePlayerId ??
+        (replay.frames?.[0]?.players?.[0] as any)?.playerId ??
+        ''
+    );
+  }, [replay]);
+
+  // Auto-advance loop. 600ms base tick, divided by playback multiplier.
+  useEffect(() => {
+    if (!replayMode || !replayPlaying) return undefined;
+    if (replayMoveIndex >= replayTotal) {
+      setReplayPlaying(false);
+      return undefined;
+    }
+    const interval = Math.max(50, Math.round(600 / Math.max(replaySpeed, 0.25)));
+    const timer = setTimeout(() => {
+      setReplayMoveIndex((prev) => Math.min(replayTotal, prev + 1));
+    }, interval);
+    return () => clearTimeout(timer);
+  }, [replayMode, replayPlaying, replayMoveIndex, replayTotal, replaySpeed]);
+
+  // Push the selected frame into the live-code overrides. Because GameBoard
+  // already consumes `playerOverride` / `spectatorOverride` with highest
+  // priority, the rest of the component renders the replay frame exactly as
+  // it does a live-subscription payload - same setter, no parallel path.
+  useEffect(() => {
+    if (!replayMode || replayFrames.length === 0) return;
+    const selected = replayFrameAt(replayFrames, replayMoveIndex);
+    if (!selected) return;
+    const reducedPlayer = buildReplayPlayerMatchView(
+      selected,
+      replayPerspective || null
+    );
+    setSpectatorOverride(selected as unknown as SpectatorGameState);
+    setPlayerOverride(reducedPlayer as unknown as PlayerMatchView);
+  }, [replayMode, replayFrames, replayMoveIndex, replayPerspective]);
+
+  // =========================================================================
+  // Spectator mode: frame buffer + pause / scrub
+  // =========================================================================
+  // Append-only buffer of every spectator-shape frame seen on this mount.
+  // When the user pauses, we pin `spectatorOverride` to buffer[index] while
+  // still accepting new frames into the buffer so a scrubber can step
+  // forward through anything that arrived while paused. Capped to avoid
+  // unbounded memory on a long-running watch.
+  const SPECTATOR_BUFFER_MAX = 1000;
+  const [spectatorFrameBuffer, setSpectatorFrameBuffer] = useState<
+    SpectatorGameState[]
+  >([]);
+  const [spectatorPaused, setSpectatorPaused] = useState(false);
+  const [spectatorFrameIndex, setSpectatorFrameIndex] = useState(0);
+  const spectatorPausedRef = useRef(false);
+  useEffect(() => {
+    spectatorPausedRef.current = spectatorPaused;
+  }, [spectatorPaused]);
+
+  // Clear the buffer whenever the viewer switches matches. Replay mode owns
+  // its own pipeline, so only wipe when entering spectator mode.
+  useEffect(() => {
+    if (!spectatorMode) return;
+    setSpectatorFrameBuffer([]);
+    setSpectatorPaused(false);
+    setSpectatorFrameIndex(0);
+  }, [spectatorMode, matchId]);
+
+  // Ingest each subscription tick into the buffer and, while following
+  // live, keep the index on the tail. The subscription is match-scoped and
+  // fires on every engine dispatch (see bot-match.ts:publishSpectatorState).
+  const incomingSpectatorFrame = spectatorSubData?.gameStateChanged;
+  useEffect(() => {
+    if (!spectatorMode || !incomingSpectatorFrame) return;
+    setSpectatorFrameBuffer((prev) => {
+      const next = [...prev, incomingSpectatorFrame as SpectatorGameState];
+      if (next.length > SPECTATOR_BUFFER_MAX) {
+        return next.slice(next.length - SPECTATOR_BUFFER_MAX);
+      }
+      return next;
+    });
+  }, [spectatorMode, incomingSpectatorFrame]);
+
+  // Whenever the buffer grows while the viewer is following live, snap the
+  // index to the tail. We always push the latest frame into the override
+  // setters because GameBoard's loading gate needs `playerView` to be
+  // non-null and the live spectator subscription on its own doesn't
+  // populate the player-scoped override - only the replay-style projection
+  // of the spectator frame does.
+  useEffect(() => {
+    if (!spectatorMode) return;
+    if (spectatorFrameBuffer.length === 0) return;
+    if (spectatorPausedRef.current) return;
+    const latest = spectatorFrameBuffer[spectatorFrameBuffer.length - 1];
+    setSpectatorFrameIndex(spectatorFrameBuffer.length - 1);
+    if (latest) {
+      setSpectatorOverride(latest);
+      const projected = buildReplayPlayerMatchView(
+        latest as unknown as ReplaySpectatorState,
+        playerId || null
+      );
+      setPlayerOverride(projected as unknown as PlayerMatchView);
+    }
+  }, [spectatorMode, spectatorFrameBuffer, playerId]);
+
+  // When paused, drive the render off the selected buffered frame.
+  useEffect(() => {
+    if (!spectatorMode || !spectatorPaused) return;
+    const frame = spectatorFrameBuffer[spectatorFrameIndex];
+    if (!frame) return;
+    setSpectatorOverride(frame);
+    const projected = buildReplayPlayerMatchView(
+      frame as unknown as ReplaySpectatorState,
+      playerId || null
+    );
+    setPlayerOverride(projected as unknown as PlayerMatchView);
+  }, [spectatorMode, spectatorPaused, spectatorFrameBuffer, spectatorFrameIndex, playerId]);
+
+  const spectatorBufferSize = spectatorFrameBuffer.length;
+  const spectatorMaxIndex = Math.max(0, spectatorBufferSize - 1);
+  // `replayMoveIndex` / `replayTotal` work in terms of move-count (0-based
+  // with N moves), so step / scrub arithmetic treats the final index as
+  // `frames.length - 1`. ReplayControls was designed around that contract;
+  // spectator mode reuses the same component with the same contract.
+
   const [battlefieldCountdown, setBattlefieldCountdown] = useState<number | null>(null);
   const [battlefieldAdvanceTriggered, setBattlefieldAdvanceTriggered] = useState(false);
   const [battlefieldAdvanceComplete, setBattlefieldAdvanceComplete] = useState(false);
@@ -2544,6 +2824,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const [awaitingConcessionResult, setAwaitingConcessionResult] = useState(false);
   const [draggingUnitId, setDraggingUnitId] = useState<string | null>(null);
   const [dragOverBattlefieldId, setDragOverBattlefieldId] = useState<string | null>(null);
+  const [dragOverHiddenSlotId, setDragOverHiddenSlotId] = useState<string | null>(null);
   const { pushToast } = useToasts();
   const [duelLog, setDuelLog] = useState<DuelLogEntry[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessageEntry[]>([]);
@@ -2655,6 +2936,9 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       playerId?: string | null;
       actorName?: string | null;
     }) => {
+      if (replayMode || spectatorMode) {
+        return;
+      }
       if (!matchId || !id) {
         return;
       }
@@ -2977,6 +3261,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   }, [optimisticTapCount, playerCreatures]);
   const moveUnitToLocation = useCallback(
     async (unitId: string, destinationId: string) => {
+      if (replayMode || spectatorMode) return;
       const unitCard = playerCreatures.find((card) => card.instanceId === unitId);
       if (!unitCard) {
         notify('Unable to locate that unit.', 'error', { banner: true });
@@ -3067,11 +3352,14 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const opponent: OpponentSummary | undefined = playerView?.opponent ?? undefined;
   const flow: GameStateView | undefined = playerView?.gameState;
   const spectatorPlayers = spectatorState?.players ?? [];
-  const spectatorSelf = spectatorPlayers.find(
-    (p) => p.playerId === playerId
-  );
+  // In spectator mode the viewer isn't necessarily in the match roster, so
+  // fall back to the first participant for perspective (mirrors the behavior
+  // in app/replay/[matchId]/page.tsx).
+  const spectatorSelf =
+    spectatorPlayers.find((p) => p.playerId === playerId) ??
+    (spectatorMode ? spectatorPlayers[0] : undefined);
   const spectatorOpponent = spectatorPlayers.find(
-    (p) => p.playerId !== playerId
+    (p) => p.playerId !== (spectatorSelf?.playerId ?? playerId)
   );
   const priorityWindow = spectatorState?.priorityWindow;
   const focusPlayerIdState = spectatorState?.focusPlayerId ?? null;
@@ -3242,16 +3530,36 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     if (!matchId) {
       return;
     }
+    // Arena-sync forces a refetch of the live match/playerMatch queries. In
+    // replay mode those queries are skipped (liveMatchId === '') but
+    // `refetchMatch()` ignores `skip` and still hits the backend with empty
+    // variables, which 404s and spams the console. Skip the interval
+    // entirely when we're driving the board off a pre-recorded frame list -
+    // there's no live backend state to reconcile with. Spectator mode still
+    // benefits from the sync as a safety net for a dropped subscription.
+    if (replayMode) {
+      return;
+    }
     const syncInterval = setInterval(() => {
       void refreshArenaState();
     }, ARENA_SYNC_INTERVAL_MS);
     return () => clearInterval(syncInterval);
-  }, [matchId, refreshArenaState]);
+  }, [matchId, refreshArenaState, replayMode]);
 
   useEffect(() => {
+    // In replay and spectator modes the overrides are the *source* of
+    // truth - the replay effect and the spectator frame-buffer effect set
+    // them from the authoritative engine frame. Clearing them here would
+    // race those effects on mount and strand GameBoard in the loading
+    // gate, because `playerView`/`spectatorState` would momentarily fall
+    // back to null. The spectator buffer itself is reset by its own
+    // match-scoped effect.
+    if (replayMode || spectatorMode) {
+      return;
+    }
     setPlayerOverride(null);
     setSpectatorOverride(null);
-  }, [matchId]);
+  }, [matchId, replayMode, spectatorMode]);
   useEffect(() => {
     setPlayerSnapshot(null);
     setSpectatorSnapshot(null);
@@ -3267,10 +3575,18 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   useEffect(() => {
     if (spectatorSubData?.gameStateChanged) {
+      // In spectator mode the frame-buffer effect owns `spectatorOverride`
+      // and `playerOverride` - clearing them here races the buffer write
+      // and flickers the board back into its loading gate on every tick.
+      // The match-level `match` query that `refreshArenaState` refetches
+      // is also redundant with the subscription payload for spectator use.
+      if (spectatorMode) {
+        return;
+      }
       setSpectatorOverride(null);
       void refreshArenaState();
     }
-  }, [refreshArenaState, spectatorSubData?.gameStateChanged]);
+  }, [refreshArenaState, spectatorMode, spectatorSubData?.gameStateChanged]);
 
   useEffect(() => {
     setPlayerDeckOrder((prev) => alignDeckOrder(prev, playerDeckCount, `self-${matchId}`));
@@ -3434,14 +3750,16 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     : 1;
   const playerTargetPrompt =
     targetPrompts.find((prompt) => prompt.playerId === playerId && !prompt.resolved) ?? null;
-  const opponentTargetPending = useMemo(
+  const opponentTargetPrompt = useMemo(
     () =>
-      Boolean(
-        opponentPlayerId &&
-          targetPrompts.some((prompt) => prompt.playerId === opponentPlayerId && !prompt.resolved)
-      ),
+      opponentPlayerId
+        ? targetPrompts.find((prompt) => prompt.playerId === opponentPlayerId && !prompt.resolved) ?? null
+        : null,
     [opponentPlayerId, targetPrompts]
   );
+  const opponentTargetPending = Boolean(opponentTargetPrompt);
+  const opponentTargetScope = (opponentTargetPrompt?.data?.scope as string | undefined) ?? null;
+  const opponentTargetSourceName = (opponentTargetPrompt?.data?.sourceCardName as string | undefined) ?? null;
 
   // Spell Reaction prompt: shows when opponent casts a spell targeting something
   const playerSpellReactionPrompt =
@@ -3470,6 +3788,41 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   // Get active reaction chain from game state
   const reactionChain = spectatorState?.reactionChain ?? null;
 
+  // Get all targets from the active chain (for highlighting)
+  const chainTargetInstanceIds = useMemo(() => {
+    if (!reactionChain?.items?.length) return new Set<string>();
+    const targets = new Set<string>();
+    reactionChain.items.forEach((item: any) => {
+      (item.targets ?? []).forEach((t: string) => targets.add(t));
+    });
+    return targets;
+  }, [reactionChain]);
+
+  // Helper to check if a card is being targeted by a chain item
+  const isChainTarget = useCallback(
+    (card: BaseCard): boolean => {
+      const instanceId = card.instanceId;
+      if (!instanceId) return false;
+      return chainTargetInstanceIds.has(instanceId);
+    },
+    [chainTargetInstanceIds]
+  );
+
+  // Get staged spells from the chain (for visual display)
+  const stagedSpells = useMemo(() => {
+    if (!reactionChain?.items?.length) return [];
+    return reactionChain.items
+      .filter((item: any) => item.type === 'spell' && item.card)
+      .map((item: any) => ({
+        card: item.card,
+        casterId: item.casterId,
+        targets: item.targets ?? [],
+        targetDescriptions: item.targetDescriptions ?? [],
+        isOwn: item.casterId === playerId,
+        linkNumber: reactionChain.items.indexOf(item) + 1
+      }));
+  }, [reactionChain, playerId]);
+
   const targetScope = (playerTargetPrompt?.data?.scope as string) ?? 'unit';
   const targetSelectionMax = playerTargetPrompt
     ? Math.max(1, Number(playerTargetPrompt.data?.max ?? 1))
@@ -3484,6 +3837,10 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     (playerTargetPrompt?.data?.sourceCardName as string | undefined) ?? null;
   const targetAllowFriendly = playerTargetPrompt?.data?.allowFriendly !== false;
   const targetAllowOpponent = playerTargetPrompt?.data?.allowOpponent !== false;
+  // Use spectatorSelf/spectatorOpponent for target candidates to ensure consistency
+  // with the battlefield view which renders from spectatorPlayers
+  const spectatorSelfCreatures = spectatorSelf?.board?.creatures ?? [];
+  const spectatorOpponentCreatures = spectatorOpponent?.board?.creatures ?? [];
   const targetCandidates = useMemo(() => {
     if (!playerTargetPrompt) {
       return [];
@@ -3492,8 +3849,9 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       return playerGraveyard;
     }
     if (targetScope === 'unit') {
-      const friendly = targetAllowFriendly ? playerCreatures : [];
-      const enemy = targetAllowOpponent ? opponentCreatures : [];
+      // Use spectator data to match what's displayed on the battlefield
+      const friendly = targetAllowFriendly ? spectatorSelfCreatures : [];
+      const enemy = targetAllowOpponent ? spectatorOpponentCreatures : [];
       return [...friendly, ...enemy];
     }
     if (targetScope === 'battlefield') {
@@ -3509,8 +3867,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     }
     return [];
   }, [
-    opponentCreatures,
-    playerCreatures,
+    spectatorSelfCreatures,
+    spectatorOpponentCreatures,
     playerGraveyard,
     playerTargetPrompt,
     spectatorState?.battlefields,
@@ -3555,23 +3913,27 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     }
     const scope = spellTargetScope;
     
+    // Use spectator data for consistency with battlefield rendering
+    const selfCreatures = spectatorSelfCreatures;
+    const enemyCreatures = spectatorOpponentCreatures;
+    
     switch (scope) {
       case 'ally_unit':
-        return playerCreatures;
+        return selfCreatures;
       case 'enemy_unit':
-        return opponentCreatures;
+        return enemyCreatures;
       case 'any_unit':
       case 'unit': {
-        const friendly = spellTargetAllowFriendly ? playerCreatures : [];
-        const enemy = spellTargetAllowEnemy ? opponentCreatures : [];
+        const friendly = spellTargetAllowFriendly ? selfCreatures : [];
+        const enemy = spellTargetAllowEnemy ? enemyCreatures : [];
         return [...friendly, ...enemy];
       }
       case 'ally_units':
-        return playerCreatures;
+        return selfCreatures;
       case 'enemy_units':
-        return opponentCreatures;
+        return enemyCreatures;
       case 'all_units':
-        return [...playerCreatures, ...opponentCreatures];
+        return [...selfCreatures, ...enemyCreatures];
       case 'battlefield':
         return (spectatorState?.battlefields ?? []).map((bf: any) => ({
           cardId: bf.battlefieldId,
@@ -3597,8 +3959,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     spellTargetScope,
     spellTargetAllowFriendly,
     spellTargetAllowEnemy,
-    playerCreatures,
-    opponentCreatures,
+    spectatorSelfCreatures,
+    spectatorOpponentCreatures,
     playerGraveyard,
     spectatorState?.battlefields,
     playerId,
@@ -3704,6 +4066,27 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       return spellTargetSelection.includes(instanceId);
     },
     [spellTargetSelection]
+  );
+
+  // Helper to check if a card is a valid target for the current target prompt (unit scope)
+  const isValidPromptTarget = useCallback(
+    (card: BaseCard): boolean => {
+      if (!playerTargetPrompt || targetScope !== 'unit') return false;
+      const instanceId = card.instanceId;
+      if (!instanceId) return false;
+      return targetCandidates.some((c: BaseCard) => c.instanceId === instanceId);
+    },
+    [playerTargetPrompt, targetScope, targetCandidates]
+  );
+
+  // Helper to check if a card is selected as a target prompt target
+  const isPromptTargetSelected = useCallback(
+    (card: BaseCard): boolean => {
+      const instanceId = card.instanceId;
+      if (!instanceId) return false;
+      return targetSelection.includes(instanceId);
+    },
+    [targetSelection]
   );
 
   const opponentCoinFlipPrompt = useMemo(() => {
@@ -3954,6 +4337,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const commenceBattle = useCallback(
     async (battlefieldId: string) => {
+      if (replayMode || spectatorMode) return;
       if (!canAct) {
         notify('You cannot commence combat right now.', 'info', { banner: true });
         return;
@@ -4070,6 +4454,72 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       setPendingLeaderDeployment(false);
     }
   }, [pendingLeaderDeployment, playerLeaderReady]);
+
+  const handleHideCard = useCallback(
+    async (cardIndex: number, battlefieldId: string) => {
+      if (replayMode || spectatorMode) return;
+      if (!canPlayCards) {
+        notify('You cannot hide cards right now.', 'info', { banner: true });
+        return;
+      }
+      const card = currentPlayer.hand[cardIndex];
+      if (!card) {
+        notify('Card not found.', 'error', { banner: true });
+        return;
+      }
+      if (!cardHasMechanic(card, 'Hidden')) {
+        notify('Only cards with [Hidden] can be hidden.', 'warning', { banner: true });
+        return;
+      }
+      try {
+        await hideCardMutation({
+          variables: {
+            matchId,
+            playerId,
+            cardIndex,
+            battlefieldId
+          }
+        });
+        notify(`${card.name ?? 'Card'} hidden on battlefield.`, 'success', { banner: true });
+        await refreshArenaState();
+      } catch (error) {
+        console.error('Failed to hide card', error);
+        const fallbackMessage =
+          error instanceof Error && error.message
+            ? error.message
+            : 'Unable to hide card.';
+        notify(fallbackMessage, 'error', { banner: true });
+      }
+    },
+    [canPlayCards, currentPlayer.hand, hideCardMutation, matchId, playerId, notify, refreshArenaState]
+  );
+
+  const handleActivateHiddenCard = useCallback(
+    async (hiddenInstanceId: string, targets?: string[]) => {
+      if (replayMode || spectatorMode) return;
+      try {
+        await activateHiddenCardMutation({
+          variables: {
+            matchId,
+            playerId,
+            hiddenInstanceId,
+            targets: targets ?? []
+          }
+        });
+        notify('Hidden card revealed!', 'success', { banner: true });
+        await refreshArenaState();
+      } catch (error) {
+        console.error('Failed to activate hidden card', error);
+        const fallbackMessage =
+          error instanceof Error && error.message
+            ? error.message
+            : 'Unable to activate hidden card.';
+        notify(fallbackMessage, 'error', { banner: true });
+      }
+    },
+    [activateHiddenCardMutation, matchId, playerId, notify, refreshArenaState]
+  );
+
   const hasAdvancePhasePrompt = Boolean(playerDiscardPrompt || playerTargetPrompt);
   const canAdvancePhase =
     canAct && rawStatus === 'in_progress' && !hasAdvancePhasePrompt && !isCombatPromptActive;
@@ -4304,6 +4754,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       useAccelerate: boolean,
       animateKey?: string | null
     ) => {
+      if (replayMode || spectatorMode) return;
       const card = currentPlayer.hand[cardIndex];
       if (!card) {
         return;
@@ -4353,6 +4804,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       destinationId?: string | null,
       options?: { animateKey?: string | null; skipAcceleratePrompt?: boolean; useAccelerate?: boolean }
     ) => {
+      if (replayMode || spectatorMode) return;
       if (!canPlayCards) {
         return;
       }
@@ -4412,6 +4864,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const handleChampionLeaderDeploy = useCallback(
     async (destinationId?: string | null) => {
+      if (replayMode || spectatorMode) return;
       if (!canPlayCards) {
         notify('You cannot deploy your leader right now.', 'info', { banner: true });
         return;
@@ -4627,8 +5080,89 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     ]
   );
 
+  /**
+   * Check if a hand card can be hidden to a specific battlefield's hidden slot.
+   * Only cards that explicitly say "Hide now for" can be played as hidden.
+   * Cards that just reference [Hidden] (like Ava Achiever) cannot be hidden themselves.
+   */
+  const canHideCardToBattlefield = useCallback(
+    (card: BaseCard | null, battlefieldId: string): boolean => {
+      if (!card) return false;
+      // Card must have "Hide now for" in its effect text - this indicates it can be played hidden
+      // Just having [Hidden] referenced (like "play a card with [Hidden]") doesn't count
+      const effectText = card.effect || '';
+      if (!/hide now for/i.test(effectText)) return false;
+      
+      const battlefield = battlefields.find((f) => f.battlefieldId === battlefieldId);
+      if (!battlefield) return false;
+      
+      // Can only hide to a battlefield you control
+      if (battlefield.controller !== playerId) return false;
+      
+      // Check if hidden slot is already occupied
+      const hiddenCard = battlefield.hiddenCards?.find(hc => hc.ownerId === playerId);
+      if (hiddenCard) return false;
+      
+      return true;
+    },
+    [battlefields, playerId]
+  );
+
+  const handleHiddenSlotDragOver = useCallback(
+    (battlefieldId: string, event: React.DragEvent<HTMLDivElement>) => {
+      if (draggingHandIndex === null) return;
+      
+      const card = currentPlayer.hand[draggingHandIndex] ?? null;
+      if (canHideCardToBattlefield(card, battlefieldId)) {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+        setDragOverHiddenSlotId((prev) => (prev === battlefieldId ? prev : battlefieldId));
+      }
+    },
+    [canHideCardToBattlefield, currentPlayer.hand, draggingHandIndex]
+  );
+
+  const handleHiddenSlotDragLeave = useCallback(
+    (battlefieldId: string, event: React.DragEvent<HTMLDivElement>) => {
+      if (draggingHandIndex === null) return;
+      
+      const nextTarget = event.relatedTarget as Node | null;
+      if (nextTarget && event.currentTarget.contains(nextTarget)) {
+        return;
+      }
+      setDragOverHiddenSlotId((prev) => (prev === battlefieldId ? null : prev));
+    },
+    [draggingHandIndex]
+  );
+
+  const handleHiddenSlotDrop = useCallback(
+    (battlefieldId: string, event: React.DragEvent<HTMLDivElement>) => {
+      if (draggingHandIndex === null) {
+        setDragOverHiddenSlotId(null);
+        return;
+      }
+      
+      const card = currentPlayer.hand[draggingHandIndex] ?? null;
+      if (!canHideCardToBattlefield(card, battlefieldId)) {
+        setDragOverHiddenSlotId(null);
+        return;
+      }
+      
+      event.preventDefault();
+      const index = draggingHandIndex;
+      setDraggingHandIndex(null);
+      setDraggingCardKey(null);
+      setDragOverHiddenSlotId(null);
+      setBoardDragHover(false);
+      
+      void handleHideCard(index, battlefieldId);
+    },
+    [canHideCardToBattlefield, currentPlayer.hand, draggingHandIndex, handleHideCard]
+  );
+
   const handleInitiativeChoice = useCallback(
     async (choiceValue: number) => {
+      if (replayMode || spectatorMode) return;
       if (playerInitiativeLocked || awaitingInitiativeResolution) {
         return;
       }
@@ -4669,21 +5203,51 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     },
     [playerRunes]
   );
+  // Check if player is in a reaction window (spell reaction or chain reaction)
+  const isInReactionWindow = Boolean(playerSpellReactionPrompt || playerChainReactionPrompt);
+  
   const playableCardFlags = useMemo(
     () =>
       currentPlayer.hand.map((card) => {
         if (!canPlayCards) {
           return false;
         }
-        return canAffordCard(card);
+        if (!canAffordCard(card)) {
+          return false;
+        }
+        const cardType = (card.type ?? '').toUpperCase();
+        
+        // During a reaction window (responding to opponent's spell), only REACTION cards can be played
+        if (isInReactionWindow) {
+          return cardType === 'SPELL' && cardSupportsCombatTiming(card, 'reaction');
+        }
+        
+        // During combat (showdown), only spells with appropriate timing can be played
+        if (hasCombatPriority && combatStage) {
+          if (cardType !== 'SPELL') {
+            return false; // Only spells during combat
+          }
+          // During action stage: both ACTION and REACTION cards are allowed
+          // During reaction stage: only REACTION cards are allowed
+          if (combatStage === 'action') {
+            return cardSupportsCombatTiming(card, 'action') || cardSupportsCombatTiming(card, 'reaction');
+          }
+          return cardSupportsCombatTiming(card, 'reaction');
+        }
+        
+        // Outside of combat/reaction, all affordable cards can be played
+        return true;
       }),
-    [canAffordCard, canPlayCards, currentPlayer.hand]
+    [canAffordCard, canPlayCards, currentPlayer.hand, hasCombatPriority, combatStage, isInReactionWindow]
   );
   const handFocusStates = useMemo(
     () => {
-      // Highlight REACTION cards when player has spell reaction prompt or chain reaction prompt
+      // Highlight REACTION spell cards when player has spell reaction prompt or chain reaction prompt
       if (playerSpellReactionPrompt || playerChainReactionPrompt) {
-        return currentPlayer.hand.map((card) => {
+        return currentPlayer.hand.map((card, index) => {
+          if (!playableCardFlags[index]) return null; // Not playable (can't afford or other restriction)
+          const cardType = (card.type ?? '').toUpperCase();
+          if (cardType !== 'SPELL') return null; // Only spells during reaction windows
           const isReaction = cardSupportsCombatTiming(card, 'reaction');
           return isReaction ? 'reaction' : null;
         });
@@ -4691,11 +5255,24 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       if (!hasCombatPriority || !combatStage) {
         return currentPlayer.hand.map(() => null);
       }
-      return currentPlayer.hand.map((card) =>
-        cardSupportsCombatTiming(card, combatStage) ? combatStage : null
-      );
+      // During combat (showdown), highlight spells with appropriate timing
+      return currentPlayer.hand.map((card, index) => {
+        if (!playableCardFlags[index]) return null; // Not playable
+        const cardType = (card.type ?? '').toUpperCase();
+        if (cardType !== 'SPELL') return null; // Only spells during combat
+        // During action stage, highlight both action and reaction cards
+        const isAction = cardSupportsCombatTiming(card, 'action');
+        const isReaction = cardSupportsCombatTiming(card, 'reaction');
+        if (combatStage === 'action') {
+          if (isAction) return 'action';
+          if (isReaction) return 'reaction';
+          return null;
+        }
+        // During reaction stage, only highlight reaction cards
+        return isReaction ? 'reaction' : null;
+      });
     },
-    [combatStage, currentPlayer.hand, hasCombatPriority, playerChainReactionPrompt, playerSpellReactionPrompt]
+    [combatStage, currentPlayer.hand, hasCombatPriority, playerChainReactionPrompt, playerSpellReactionPrompt, playableCardFlags]
   );
 
   const toggleMulliganSelection = (index: number) => {
@@ -4769,10 +5346,11 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   );
 
   const confirmSpellWithTargets = useCallback(async () => {
+    if (replayMode || spectatorMode) return;
     if (!pendingSpellTargeting || !canConfirmSpellTarget) {
       return;
     }
-    
+
     const { cardIndex, animateKey } = pendingSpellTargeting;
     const targets = [...spellTargetSelection];
     
@@ -4832,8 +5410,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         ? spellTargetSelection.length + 1 
         : spellTargetSelection.length - 1;
       
-      if (willBeSelected && spellTargetMax === 1 && newCount === 1) {
-        // For single-target spells, immediately cast when target is selected
+      // Auto-confirm when max targets reached (for any spell with a max limit)
+      if (willBeSelected && spellTargetMax > 0 && newCount === spellTargetMax) {
         setTimeout(() => {
           confirmSpellWithTargets();
         }, 100);
@@ -4857,15 +5435,36 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       return;
     }
     if (!playableCardFlags[index]) {
-      notify('Insufficient runes to play this card.', 'warning', { banner: true });
+      // Determine why the card can't be played for a more helpful message
+      const cardType = (card.type ?? '').toUpperCase();
+      if (isInReactionWindow) {
+        if (cardType !== 'SPELL' || !cardSupportsCombatTiming(card, 'reaction')) {
+          notify('Only REACTION spells can be played in response.', 'warning', { banner: true });
+        } else {
+          notify('Insufficient runes to play this card.', 'warning', { banner: true });
+        }
+      } else if (hasCombatPriority && combatStage) {
+        if (cardType !== 'SPELL') {
+          notify('Only spells can be played during a showdown.', 'warning', { banner: true });
+        } else if (combatStage === 'action' && !cardSupportsCombatTiming(card, 'action') && !cardSupportsCombatTiming(card, 'reaction')) {
+          notify('Only ACTION or REACTION spells can be played during a showdown.', 'warning', { banner: true });
+        } else if (combatStage === 'reaction' && !cardSupportsCombatTiming(card, 'reaction')) {
+          notify('Only REACTION spells can be played right now.', 'warning', { banner: true });
+        } else {
+          notify('Insufficient runes to play this card.', 'warning', { banner: true });
+        }
+      } else {
+        notify('Insufficient runes to play this card.', 'warning', { banner: true });
+      }
       return;
     }
-    const cardType = (card.type ?? '').toUpperCase();
+    const cardTypeFinal = (card.type ?? '').toUpperCase();
     
     // Check if this is a spell that requires targeting
-    if (cardType === 'SPELL') {
+    if (cardTypeFinal === 'SPELL') {
       const targeting = card.spellTargeting;
-      if (targeting?.requiresSelection && (targeting.minTargets ?? 0) > 0) {
+      // Enter targeting mode if spell requires selection (even if minTargets is 0 for "up to X" effects)
+      if (targeting?.requiresSelection && (targeting.maxTargets ?? 0) > 0) {
         // This spell requires targeting - enter targeting mode
         setPendingSpellTargeting({
           cardIndex: index,
@@ -4876,7 +5475,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       }
     }
     
-    if (cardType === 'CREATURE') {
+    if (cardTypeFinal === 'CREATURE') {
       // Check deployment permissions for this card
       const cardPerms = getCardBattlefieldDeploymentPermissions(card);
       const canDeployToOpen = cardPerms.canPlayToOpenBattlefield || hasAllyGrantingOpenBattlefieldDeploy;
@@ -5015,6 +5614,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const submitMulliganChoice = useCallback(
     async (selection: number[]) => {
+      if (replayMode || spectatorMode) return;
       try {
         await submitMulligan({
           variables: {
@@ -5076,6 +5676,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   };
 
   const handleConfirmDiscardSelection = useCallback(() => {
+    if (replayMode || spectatorMode) return;
     if (!playerDiscardPrompt || !matchId || !playerId || submittingDiscardSelection) {
       return;
     }
@@ -5120,6 +5721,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   ]);
 
   const handleConfirmTargetSelection = useCallback(() => {
+    if (replayMode || spectatorMode) return;
     if (!playerTargetPrompt || !matchId || !playerId || submittingTargetSelection) {
       return;
     }
@@ -5161,7 +5763,33 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     targetSelectionMin
   ]);
 
+  // Handler for clicking a unit when in target prompt mode (unit scope)
+  const handlePromptTargetClick = useCallback(
+    (card: BaseCard) => {
+      if (!playerTargetPrompt || targetScope !== 'unit') return;
+      const instanceId = card.instanceId;
+      if (!instanceId || !isValidPromptTarget(card)) return;
+      
+      toggleTargetSelection(instanceId);
+      
+      // Auto-confirm when exactly the required targets are selected (for single-target effects)
+      const willBeSelected = !targetSelection.includes(instanceId);
+      const newCount = willBeSelected 
+        ? targetSelection.length + 1 
+        : targetSelection.length - 1;
+      
+      // Auto-confirm for single target selection when min and max are both 1
+      if (willBeSelected && targetSelectionMin === 1 && targetSelectionMax === 1 && newCount === 1) {
+        setTimeout(() => {
+          handleConfirmTargetSelection();
+        }, 100);
+      }
+    },
+    [playerTargetPrompt, targetScope, isValidPromptTarget, toggleTargetSelection, targetSelection, targetSelectionMin, targetSelectionMax, handleConfirmTargetSelection]
+  );
+
   const handleSelectBattlefield = async (battlefieldId: string) => {
+    if (replayMode || spectatorMode) return;
     if (!battlefieldId) {
       return;
     }
@@ -5182,6 +5810,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   };
 
   const handleNextPhase = async () => {
+    if (replayMode || spectatorMode) return;
     if (!matchId || !playerId) {
       notify('Match context is missing.', 'error', { banner: true });
       return;
@@ -5213,6 +5842,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   };
 
   const handlePassPriority = useCallback(async () => {
+    if (replayMode || spectatorMode) return;
     if (!combatContext || focusPlayerIdState !== playerId) {
       return;
     }
@@ -5231,6 +5861,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   }, [combatContext, focusPlayerIdState, matchId, notify, passPriority, playerId]);
 
   const handleSpellReactionPass = useCallback(async () => {
+    if (replayMode || spectatorMode) return;
     if (!playerSpellReactionPrompt) {
       return;
     }
@@ -5250,6 +5881,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   }, [matchId, notify, playerId, playerSpellReactionPrompt, respondToSpellReaction]);
 
   const handleChainReactionPass = useCallback(async () => {
+    if (replayMode || spectatorMode) return;
     if (!playerChainReactionPrompt) {
       return;
     }
@@ -5269,6 +5901,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   }, [matchId, notify, playerId, playerChainReactionPrompt, respondToChainReaction]);
 
   const handleChampionLegendActivate = useCallback(async () => {
+    if (replayMode || spectatorMode) return;
     if (!matchId || !playerId) {
       return;
     }
@@ -5322,6 +5955,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   };
 
   const confirmConcede = useCallback(async () => {
+    if (replayMode || spectatorMode) return;
     if (concedingMatch) {
       return;
     }
@@ -5370,9 +6004,21 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     router.push('/matchmaking?fromMatch=true');
   }, [router]);
 
+  const handleWatchReplay = useCallback(() => {
+    if (!matchId) {
+      return;
+    }
+    router.push(`/replay/${matchId}`);
+  }, [router, matchId]);
+
+  const handleViewHistory = useCallback(() => {
+    router.push('/history');
+  }, [router]);
+
   const handleChatSubmit = useCallback(
     async (event?: React.FormEvent) => {
       event?.preventDefault();
+      if (replayMode || spectatorMode) return;
       const trimmed = chatInput.trim();
       if (!trimmed) {
         return;
@@ -6030,9 +6676,11 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const handInteractable = Boolean(mulliganPrompt || canPlayCards);
   const holdBattlefieldReveal = battlefieldAdvanceTriggered && !battlefieldAdvanceComplete;
   const showInitiativeScreen =
+    !spectatorMode &&
     !battlefieldAdvanceTriggered &&
     (rawStatus === 'coin_flip' || (initiativeOutcome && initiativeRevealActive));
   const showBattlefieldScreen =
+    !spectatorMode &&
     !showInitiativeScreen &&
     (isBattlefieldPhaseActive || waitingForBattlefieldData || holdBattlefieldReveal);
   const showingInitiativeResult = Boolean(
@@ -6048,7 +6696,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const matchResultReasonLabel = formatVictoryReason(spectatorState?.endReason ?? null);
   const mulliganPromptPending = playerMulliganPending || opponentMulliganPending;
   const showMulliganModal =
-    mulliganPromptPending && !showInitiativeScreen && !showBattlefieldScreen;
+    mulliganPromptPending && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen;
   const mulliganWaitingMessage =
     !playerMulliganPending && opponentMulliganPending
       ? `Waiting for ${opponentHeading}'s mulligan choice`
@@ -6061,7 +6709,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const canConfirmDiscard =
     Boolean(playerDiscardPrompt) && discardSelection.length === requiredDiscardSelections;
   const showDiscardModal = Boolean(
-    (playerDiscardPrompt || discardWaitingMessage) && !showInitiativeScreen && !showBattlefieldScreen
+    (playerDiscardPrompt || discardWaitingMessage) && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen
   );
   const discardSourceName =
     (playerDiscardPrompt?.data?.sourceCardName as string | undefined) ?? null;
@@ -6073,12 +6721,18 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         : targetScope === 'battlefield'
           ? 'Battlefield'
           : 'Target';
+  // For non-unit scope waiting, show a modal. For unit scope, show a banner.
   const targetWaitingMessage =
-    !playerTargetPrompt && opponentTargetPending
+    !playerTargetPrompt && opponentTargetPending && opponentTargetScope !== 'unit'
       ? `Waiting for ${opponentHeading} to choose targets…`
       : null;
+  const unitTargetWaitingMessage =
+    !playerTargetPrompt && opponentTargetPending && opponentTargetScope === 'unit'
+      ? `Waiting for ${opponentHeading} to select a unit…`
+      : null;
+  // Only show target modal for graveyard/battlefield scopes - unit targeting happens inline on the board
   const showTargetModal = Boolean(
-    (playerTargetPrompt || targetWaitingMessage) && !showInitiativeScreen && !showBattlefieldScreen
+    ((playerTargetPrompt && targetScope !== 'unit') || targetWaitingMessage) && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen
   );
   
   // Spell targeting modal display
@@ -6103,7 +6757,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                       ? 'Player'
                       : 'Target';
   const showSpellTargetModal = Boolean(
-    pendingSpellTargeting && !showInitiativeScreen && !showBattlefieldScreen
+    pendingSpellTargeting && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen
   );
 
   // Spell reaction display: shows when opponent has cast a spell and you can react
@@ -6112,7 +6766,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       ? `Waiting for ${opponentHeading} to respond to spell…`
       : null;
   const showSpellReactionModal = Boolean(
-    (playerSpellReactionPrompt || spellReactionWaitingMessage) && pendingSpell && !showInitiativeScreen && !showBattlefieldScreen
+    (playerSpellReactionPrompt || spellReactionWaitingMessage) && pendingSpell && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen
   );
   
   // Chain reaction display: shows when there's an active reaction chain
@@ -6121,7 +6775,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
       ? `Waiting for ${opponentHeading} to respond to chain…`
       : null;
   const showChainReactionModal = Boolean(
-    (playerChainReactionPrompt || chainReactionWaitingMessage) && reactionChain && !showInitiativeScreen && !showBattlefieldScreen
+    (playerChainReactionPrompt || chainReactionWaitingMessage) && reactionChain && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen
   );
   
   const selfBoardTitle = selfHeading === 'You' ? 'Your Board' : `${selfHeading}'s Board`;
@@ -6134,7 +6788,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   const boardPrompts = (
     <div className="prompt-panel board-prompts">
-        {battlefieldPrompt && !showBattlefieldScreen && (
+        {battlefieldPrompt && !spectatorMode && !showBattlefieldScreen && (
           <div className="prompt-card battlefield-prompt">
             <div className="prompt-title">Battlefield Selection</div>
             <p>Select one of your battlefields to bring into the arena.</p>
@@ -6732,6 +7386,51 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const shouldHighlightBattlefieldTargets =
     (mobilizationReady || redeployReady) && battlefields.length > 0;
 
+  // Staged spells stack - shows spell cards that are on the reaction chain
+  const stagedSpellsStack = stagedSpells.length > 0 && (
+    <div className="staged-spells-stack">
+      <div className="staged-spells-stack__label">Spell Stack</div>
+      <div className="staged-spells-stack__cards">
+        {stagedSpells.map((staged, idx) => {
+          const spell = staged.card;
+          const spellImage = getCardImage(spell) ?? buildCardArtUrl(spell?.slug ?? null);
+          const casterLabel = staged.isOwn ? 'You' : opponentHeading;
+          // Show target descriptions if available, otherwise show target count
+          const targetDesc = staged.targetDescriptions?.length 
+            ? `→ ${staged.targetDescriptions.join(', ')}`
+            : staged.targets?.length 
+              ? `→ ${staged.targets.length} target${staged.targets.length !== 1 ? 's' : ''}`
+              : '';
+          return (
+            <div 
+              key={`staged-spell-${idx}`}
+              className={[
+                'staged-spell-card',
+                staged.isOwn ? 'staged-spell-card--own' : 'staged-spell-card--opponent'
+              ].filter(Boolean).join(' ')}
+              onMouseEnter={() => handleCardHover?.(spell ?? null)}
+              onMouseLeave={() => handleCardHover?.(null)}
+            >
+              <div className="staged-spell-card__chain-number">#{staged.linkNumber}</div>
+              {spellImage && (
+                <div className="staged-spell-card__image">
+                  <img src={spellImage} alt={spell?.name ?? 'Spell'} draggable={false} />
+                </div>
+              )}
+              <div className="staged-spell-card__info">
+                <div className="staged-spell-card__name">{spell?.name ?? 'Unknown Spell'}</div>
+                <div className="staged-spell-card__caster">{casterLabel}</div>
+                {targetDesc && (
+                  <div className="staged-spell-card__targets">{targetDesc}</div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
   const battlefieldStage = (
     <div className="battlefield-stage">
       <div className="battlefield-stage__cards">
@@ -6815,15 +7514,89 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
               !battlefieldLocked &&
               !combatContext;
             const canShowCommenceButton = canFinishMovementHere;
+            const playerControlsBattlefield = field.controller === playerId;
+            const hiddenCard = field.hiddenCards?.find(hc => hc.ownerId === playerId);
+            const enemyHiddenCard = field.hiddenCards?.find(hc => hc.ownerId !== playerId);
+            // Hidden card can be activated if:
+            // 1. It was set on a previous turn (not this turn)
+            // 2. The player can currently act (their turn OR they're the reaction window holder)
+            const hiddenCardReady = hiddenCard && hiddenCard.hiddenOnTurn !== currentTurnNumber;
+            const canActivateHidden = hiddenCardReady && canAct;
+            // Check if a hand card being dragged can be hidden here (reuse draggingHandCard from above)
+            const canHideDraggedCardHere = draggingHandCard && canHideCardToBattlefield(draggingHandCard, field.battlefieldId);
+            const isHiddenSlotDragHover = canHideDraggedCardHere && dragOverHiddenSlotId === field.battlefieldId;
             return (
               <div
-                className={battlefieldCardClass}
+                className="battlefield-stage__card-wrapper"
                 key={field.battlefieldId}
-                title={battlefieldLockReason ?? undefined}
-                onDragOver={(event) => handleBattlefieldDragOver(field.battlefieldId, event)}
-                onDragLeave={(event) => handleBattlefieldDragLeave(field.battlefieldId, event)}
-                onDrop={(event) => handleBattlefieldDrop(field.battlefieldId, event)}
               >
+                {/* Hidden Card Slot - Left side */}
+                <div 
+                  className={[
+                    'battlefield-stage__hidden-slot',
+                    playerControlsBattlefield ? 'battlefield-stage__hidden-slot--controlled' : '',
+                    canHideDraggedCardHere ? 'battlefield-stage__hidden-slot--drop-target' : '',
+                    isHiddenSlotDragHover ? 'battlefield-stage__hidden-slot--drag-hover' : '',
+                  ].filter(Boolean).join(' ')}
+                  onDragOver={(event) => handleHiddenSlotDragOver(field.battlefieldId, event)}
+                  onDragLeave={(event) => handleHiddenSlotDragLeave(field.battlefieldId, event)}
+                  onDrop={(event) => handleHiddenSlotDrop(field.battlefieldId, event)}
+                >
+                  {hiddenCard ? (
+                    <div
+                      className={`battlefield-stage__hidden-card battlefield-stage__hidden-card--owned ${canActivateHidden ? 'battlefield-stage__hidden-card--activatable' : ''} ${hiddenCardReady && !canActivateHidden ? 'battlefield-stage__hidden-card--ready' : ''}`}
+                      title={hiddenCard.card?.name ?? 'Hidden Card'}
+                    >
+                      <div className="battlefield-stage__hidden-card-inner">
+                        {hiddenCard.card && (
+                          <>
+                            <span className="battlefield-stage__hidden-card-icon">🎴</span>
+                            <span className="battlefield-stage__hidden-card-name">{hiddenCard.card.name}</span>
+                            {canActivateHidden ? (
+                              <button
+                                type="button"
+                                className="battlefield-stage__hidden-reveal-btn"
+                                onClick={() => handleActivateHiddenCard(hiddenCard.instanceId)}
+                                disabled={activatingHiddenCard}
+                              >
+                                {activatingHiddenCard ? '…' : 'Reveal'}
+                              </button>
+                            ) : hiddenCardReady ? (
+                              <span className="battlefield-stage__hidden-card-ready-text">✓ Ready</span>
+                            ) : (
+                              <span className="battlefield-stage__hidden-card-wait">⏳ Set this turn</span>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ) : enemyHiddenCard ? (
+                    <div
+                      className="battlefield-stage__hidden-card battlefield-stage__hidden-card--enemy"
+                      title="Opponent's Hidden Card"
+                    >
+                      <div className="battlefield-stage__hidden-card-inner">
+                        <span className="battlefield-stage__hidden-card-icon">🂠</span>
+                        <span className="battlefield-stage__hidden-card-label">Hidden</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="battlefield-stage__hidden-card battlefield-stage__hidden-card--empty">
+                      <div className="battlefield-stage__hidden-card-inner">
+                        <span className="battlefield-stage__hidden-card-icon-empty">⬡</span>
+                        <span className="battlefield-stage__hidden-card-label">Hidden Slot</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                {/* Battlefield Card */}
+                <div
+                  className={battlefieldCardClass}
+                  title={battlefieldLockReason ?? undefined}
+                  onDragOver={(event) => handleBattlefieldDragOver(field.battlefieldId, event)}
+                  onDragLeave={(event) => handleBattlefieldDragLeave(field.battlefieldId, event)}
+                  onDrop={(event) => handleBattlefieldDrop(field.battlefieldId, event)}
+                >
                 <div className="battlefield-stage__art-wrapper">
                   {art ? (
                     <img
@@ -6867,11 +7640,20 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                           .map((entry) => {
                             const isTarget = isValidSpellTarget(entry.card);
                             const isTargetSelected = isSpellTargetSelected(entry.card);
+                            const isChainTargeted = isChainTarget(entry.card);
+                            const isPromptTarget = isValidPromptTarget(entry.card);
+                            const isPromptSelected = isPromptTargetSelected(entry.card);
                             const unitClasses = [
                               'battlefield-stage__unit',
-                              isTarget ? 'battlefield-stage__unit--spell-target' : '',
-                              isTargetSelected ? 'battlefield-stage__unit--target-selected' : '',
+                              isTarget || isPromptTarget ? 'battlefield-stage__unit--spell-target' : '',
+                              isTargetSelected || isPromptSelected ? 'battlefield-stage__unit--target-selected' : '',
+                              isChainTargeted ? 'battlefield-stage__unit--chain-target' : '',
                             ].filter(Boolean).join(' ');
+                            const handleClick = isTarget
+                              ? () => handleSpellTargetClick(entry.card)
+                              : isPromptTarget
+                                ? () => handlePromptTargetClick(entry.card)
+                                : undefined;
                             return (
                               <div
                                 key={`${field.battlefieldId}-${cardIdValue(entry.card)}-opponent`}
@@ -6881,9 +7663,9 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                                   card={entry.card}
                                   compact
                                   onHover={handleCardHover}
-                                  selectable={isTarget}
-                                  isSelected={isTargetSelected}
-                                  onClick={isTarget ? () => handleSpellTargetClick(entry.card) : undefined}
+                                  selectable={isTarget || isPromptTarget}
+                                  isSelected={isTargetSelected || isPromptSelected}
+                                  onClick={handleClick}
                                 />
                               </div>
                             );
@@ -6907,18 +7689,24 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                             );
                             const isTarget = isValidSpellTarget(entry.card);
                             const isTargetSelected = isSpellTargetSelected(entry.card);
+                            const isChainTargeted = isChainTarget(entry.card);
+                            const isPromptTarget = isValidPromptTarget(entry.card);
+                            const isPromptSelected = isPromptTargetSelected(entry.card);
                             const unitClasses = [
                               'battlefield-stage__unit',
                               'battlefield-stage__unit--self',
-                              isTarget ? 'battlefield-stage__unit--spell-target' : '',
-                              isTargetSelected ? 'battlefield-stage__unit--target-selected' : '',
+                              isTarget || isPromptTarget ? 'battlefield-stage__unit--spell-target' : '',
+                              isTargetSelected || isPromptSelected ? 'battlefield-stage__unit--target-selected' : '',
+                              isChainTargeted ? 'battlefield-stage__unit--chain-target' : '',
                             ].filter(Boolean).join(' ');
-                            // If targeting a spell, prioritize that click handler
+                            // If targeting a spell or prompt, prioritize that click handler
                             const handleClick = isTarget
                               ? () => handleSpellTargetClick(entry.card)
-                              : canAct
-                                ? () => handleSelectUnit(entry.card)
-                                : undefined;
+                              : isPromptTarget
+                                ? () => handlePromptTargetClick(entry.card)
+                                : canAct
+                                  ? () => handleSelectUnit(entry.card)
+                                  : undefined;
                             return (
                               <div
                                 key={`${field.battlefieldId}-${cardKey}-self`}
@@ -6927,17 +7715,17 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                                 <CardTile
                                   card={displayCard}
                                   compact
-                                  selectable={canAct || isTarget}
-                                  isSelected={isSelected || isTargetSelected}
+                                  selectable={canAct || isTarget || isPromptTarget}
+                                  isSelected={isSelected || isTargetSelected || isPromptSelected}
                                   onClick={handleClick}
-                                  draggable={canDragUnit && !isTarget}
+                                  draggable={canDragUnit && !isTarget && !isPromptTarget}
                                   onDragStart={
-                                    canDragUnit && !isTarget
+                                    canDragUnit && !isTarget && !isPromptTarget
                                       ? (event) => handleUnitDragStart(entry.card, event)
                                       : undefined
                                   }
                                   onDragEnd={
-                                    canDragUnit && !isTarget
+                                    canDragUnit && !isTarget && !isPromptTarget
                                       ? (event) => handleUnitDragEnd(entry.card, event)
                                       : undefined
                                   }
@@ -6986,6 +7774,8 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                   <p className="muted small">{battlefieldLockReason}</p>
                 )}
               </div>
+              {/* End Battlefield Card */}
+            </div>
             );
           })
         )}
@@ -7034,7 +7824,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
 
   // Spell targeting banner - shows when selecting targets for a spell
   const spellTargetingBanner =
-    pendingSpellTargeting && pendingSpellCard && !showInitiativeScreen && !showBattlefieldScreen ? (
+    pendingSpellTargeting && pendingSpellCard && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen ? (
       <div className="spell-targeting-banner" role="status">
         <div className="spell-targeting-banner__info">
           <span>Casting</span>
@@ -7064,6 +7854,51 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           >
             Cancel
           </button>
+        </div>
+      </div>
+    ) : null;
+
+  // Unit target prompt banner - shows when selecting targets for an effect (unit scope)
+  const unitTargetPromptBanner =
+    playerTargetPrompt && targetScope === 'unit' && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen ? (
+      <div className="spell-targeting-banner" role="status">
+        <div className="spell-targeting-banner__info">
+          <span>Select Target{targetSelectionMax > 1 ? 's' : ''}</span>
+          <strong>{targetSourceName ?? 'Effect'}</strong>
+          <div className="spell-targeting-banner__details">
+            <span>
+              Selected: {targetSelection.length}
+              {targetSelectionMin > 0 || targetSelectionMax > 0 
+                ? ` / ${targetSelectionMax || targetSelectionMin}` 
+                : ''}
+            </span>
+          </div>
+        </div>
+        <div className="spell-targeting-banner__actions">
+          {canConfirmTarget ? (
+            <button
+              type="button"
+              className="prompt-button primary"
+              onClick={handleConfirmTargetSelection}
+              disabled={submittingTargetSelection}
+            >
+              {submittingTargetSelection ? 'Confirming…' : 'Confirm Targets'}
+            </button>
+          ) : null}
+        </div>
+      </div>
+    ) : null;
+
+  // Unit target waiting banner - shows when waiting for opponent to select a unit
+  const unitTargetWaitingBanner =
+    unitTargetWaitingMessage && !spectatorMode && !showInitiativeScreen && !showBattlefieldScreen ? (
+      <div className="spell-targeting-banner spell-targeting-banner--waiting" role="status">
+        <div className="spell-targeting-banner__info">
+          <span className="phase-spinner" aria-hidden="true" />
+          <span>{unitTargetWaitingMessage}</span>
+          {opponentTargetSourceName && (
+            <strong>{opponentTargetSourceName}</strong>
+          )}
         </div>
       </div>
     ) : null;
@@ -7127,12 +7962,20 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
   const spellTargetingSticky = spellTargetingBanner ? (
     <div className="spell-targeting-sticky">{spellTargetingBanner}</div>
   ) : null;
+  const unitTargetPromptSticky = unitTargetPromptBanner ? (
+    <div className="spell-targeting-sticky">{unitTargetPromptBanner}</div>
+  ) : null;
+  const unitTargetWaitingSticky = unitTargetWaitingBanner ? (
+    <div className="spell-targeting-sticky">{unitTargetWaitingBanner}</div>
+  ) : null;
   const matchStatusHeader = (
     <div className="match-status-frame">
       <div className="match-status-sticky">
         {matchStatusCluster}
         {combatPrioritySticky}
         {spellTargetingSticky}
+        {unitTargetPromptSticky}
+        {unitTargetWaitingSticky}
       </div>
       {opponentHandBanner ? (
         <div className="match-status-hand">{opponentHandBanner}</div>
@@ -7584,6 +8427,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
                   compact
                   widthPx={150}
                   onHover={handleCardHover}
+                  forceUntapped
                 />
               );
             })
@@ -7607,6 +8451,7 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
           <div className="duel-stage">
             {renderPlayerZone('opponent')}
             <div className="arena-divider">
+              {stagedSpellsStack}
               {battlefieldStage}
               {boardPrompts}
             </div>
@@ -7621,13 +8466,20 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
     </>
   );
 
+  const matchWinnerLabel = matchWinnerId
+    ? resolvePlayerLabel(matchWinnerId, 'Winner')
+    : null;
   const matchResultOverlay =
-    matchEnded && opponentNameForResult ? (
+    matchEnded && (spectatorMode || opponentNameForResult) ? (
       <MatchResultOverlay
         didWin={playerWonMatch}
         opponentName={opponentNameForResult}
         reasonLabel={matchResultReasonLabel}
-        onReturn={handleReturnToQueue}
+        onReturn={spectatorMode ? undefined : handleReturnToQueue}
+        onWatchReplay={replayMode ? undefined : handleWatchReplay}
+        onViewHistory={spectatorMode ? undefined : handleViewHistory}
+        spectator={spectatorMode}
+        winnerName={matchWinnerLabel}
       />
     ) : null;
 
@@ -7721,6 +8573,80 @@ export function GameBoard({ matchId, playerId }: GameBoardProps) {
         </div>
       )}
       {matchResultOverlay}
+      {replayMode && replay && (
+        <ReplayControls
+          moveIndex={replayMoveIndex}
+          totalMoves={replayTotal}
+          playing={replayPlaying}
+          speed={replaySpeed}
+          currentPhase={spectatorOverride?.currentPhase ?? ''}
+          turnNumber={spectatorOverride?.turnNumber ?? 0}
+          perspectivePlayerId={replayPerspective}
+          availablePlayerIds={availableReplayPlayerIds}
+          onPlayPauseToggle={() => {
+            if (replayMoveIndex >= replayTotal) {
+              setReplayMoveIndex(0);
+            }
+            setReplayPlaying((prev) => !prev);
+          }}
+          onStep={(delta) => {
+            setReplayPlaying(false);
+            setReplayMoveIndex((prev) =>
+              Math.max(0, Math.min(replayTotal, prev + delta))
+            );
+          }}
+          onScrub={(index) => {
+            setReplayPlaying(false);
+            setReplayMoveIndex(Math.max(0, Math.min(replayTotal, index)));
+          }}
+          onSpeedChange={(speed) => setReplaySpeed(speed)}
+          onPerspectiveChange={(pid) => setReplayPerspective(pid)}
+        />
+      )}
+      {spectatorMode && spectatorBufferSize > 0 && (
+        <ReplayControls
+          moveIndex={spectatorFrameIndex}
+          totalMoves={spectatorMaxIndex}
+          playing={!spectatorPaused}
+          speed={1}
+          currentPhase={spectatorOverride?.currentPhase ?? spectatorState?.currentPhase ?? ''}
+          turnNumber={spectatorOverride?.turnNumber ?? spectatorState?.turnNumber ?? 0}
+          perspectivePlayerId={playerId || null}
+          availablePlayerIds={[]}
+          onPlayPauseToggle={() => {
+            setSpectatorPaused((prev) => {
+              const next = !prev;
+              if (!next) {
+                setSpectatorFrameIndex(Math.max(0, spectatorFrameBuffer.length - 1));
+                setSpectatorOverride(null);
+              }
+              return next;
+            });
+          }}
+          onStep={(delta) => {
+            setSpectatorPaused(true);
+            setSpectatorFrameIndex((prev) =>
+              Math.max(0, Math.min(spectatorMaxIndex, prev + delta))
+            );
+          }}
+          onScrub={(index) => {
+            setSpectatorPaused(true);
+            setSpectatorFrameIndex(Math.max(0, Math.min(spectatorMaxIndex, index)));
+          }}
+          onSpeedChange={() => {
+            // Live spectate has no playback multiplier: frames arrive at
+            // engine cadence. Keep this a no-op so ReplayControls' speed
+            // buttons remain a visual constant rather than introducing a
+            // second "replay" loop that could diverge from the subscription.
+          }}
+          onPerspectiveChange={() => {
+            // No perspective switch in spectator mode yet - both players'
+            // hands are already visible in the serialized spectator frame,
+            // so there is nothing to swap. Hiding the dropdown by passing
+            // an empty `availablePlayerIds` keeps the control from rendering.
+          }}
+        />
+      )}
     </div>
   );
 }

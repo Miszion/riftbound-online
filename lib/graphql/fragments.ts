@@ -212,6 +212,16 @@ export const BATTLEFIELD_STATE_FIELDS = gql`
     card {
       ...CardSnapshotFields
     }
+    hiddenCards {
+      instanceId
+      ownerId
+      hiddenOnTurn
+      battlefieldId
+      card {
+        ...CardSnapshotFields
+      }
+      isRevealed
+    }
   }
 `
 
