@@ -10,7 +10,7 @@ A Next.js 14 front-end for the Riftbound Online experience. It delivers the land
 - **Matchmaking** – `/matchmaking` lets authenticated users enter free/ranked queues, displays live status/polling, and reacts to queue updates via subscriptions.
 - **Game Board** – `/game` renders the turn structure, rune channeling, cards in hand/board, Dorans & battlefield selection prompts, phase transitions, and “End Phase” controls with the new tapping/exhaustion visuals.
 - **Spectate & Replay** – `/spectate` connects to `gameStateChanged` subscriptions for live matches and can replay recent games by scrubbing move logs.
-- **Shared Components** – `components/` includes `GameBoard`, `GameViewer`, `RiftboundCard`, reusable auth widgets, toast system, headers/footers, etc.
+- **Shared Components** – `components/` includes `GameBoard`, `RiftboundCard`, reusable auth widgets, toast system, headers/footers, etc.
 - **Responsive Styling** – `css/styles.css` contains the landing/sign-in look & feel, while `styles/` and component-level styles cover the richer in-game layouts.
 
 ## Project Structure
@@ -28,7 +28,7 @@ app/
 
 components/
   Header.tsx, Footer.tsx
-  GameBoard.tsx, GameViewer.tsx
+  GameBoard.tsx
   RiftboundCard.tsx and UI primitives (buttons, toasts, etc.)
   auth/               # Auth-specific widgets
   ui/                 # Shared UI atoms
@@ -93,7 +93,7 @@ npm run deploy:dev    # scripts/deploy-ui.sh → build + sync ./out to S3 + CDN 
 |-------|-------------|----------------------|
 | `/` | Marketing hero page mirroring the original static HTML with responsive card art. | None |
 | `/sign-in` | Email/password sign-in & sign-up toggle. Uses `useAuth()` to call backend `/auth/sign-in`, `/auth/sign-up`, `/auth/refresh`. Displays loading states + toasts. | Cognito-enabled backend |
-| `/deckbuilder` | Auth-gated deckbuilder with catalog search/filter, deck rules, save/load decklists. | `cardCatalog`, `decklists`, `saveDecklist`, `deleteDecklist` GraphQL ops |
+| `/deckbuilder` | Auth-gated deckbuilder with catalog search/filter, deck rules, save/load decklists. | `GET /api/cards` REST endpoint plus `decklists`, `saveDecklist`, `deleteDecklist`, `cardBySlug`, `cardById` GraphQL ops |
 | `/matchmaking` | Queue for ranked/free matches, live status polling + subscription updates, ability to leave queue. | Matchmaking GraphQL queries/mutations/subscriptions |
 | `/game` | Full turn-based board UI (Dorans selection, battlefield reveal, mulligan modal, ABCD turn flow, tapping/exhaustion visuals, rune channeling, chat/log controls). | Player/spectator match GraphQL endpoints + action mutations |
 | `/spectate` | Live match view and replay browser with move-by-move playback. | `gameStateChanged`, `recentMatches`, `matchReplay` GraphQL APIs |
@@ -115,8 +115,7 @@ npm run deploy:dev    # scripts/deploy-ui.sh → build + sync ./out to S3 + CDN 
 ## Match & Spectator Flows
 
 - All gameplay data flows through `useGraphQL` hooks: queries (`GET_MATCH`, `GET_PLAYER_MATCH`, etc.), mutations (play card, attack, move, next phase, battlefield selection, Dorans initiative, mulligan), and subscriptions (phase changes, match completion, matchmaking status).
-- `components/GameBoard.tsx` handles Dorans/battlefield selections, manual/automatic phase progression, card tapping visuals, rune exhaustion, and board layout.
-- `components/GameViewer.tsx` renders spectator/replay views and handles timers between Dorans/battlefield/mulligan screens so players can view both selections before moving on.
+- `components/GameBoard.tsx` handles Dorans/battlefield selections, manual/automatic phase progression, card tapping visuals, rune exhaustion, and board layout. It also drives spectator/replay views via pre-enriched card metadata.
 
 ## Deployment Notes
 

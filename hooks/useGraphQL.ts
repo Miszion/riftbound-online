@@ -24,7 +24,6 @@ import {
   RESPOND_TO_SPELL_REACTION,
   RESPOND_TO_CHAIN_REACTION,
   ACTIVATE_CHAMPION_POWER,
-  GET_CARD_CATALOG,
   GET_DECKLISTS,
   SAVE_DECKLIST,
   DELETE_DECKLIST,
@@ -199,14 +198,12 @@ export function useConcedeMatch() {
 }
 
 // ============================================================================
-// CARD CATALOG & DECKLIST HOOKS
+// DECKLIST HOOKS
 // ============================================================================
-
-export function useCardCatalog(filter?: Record<string, unknown>) {
-  return useQuery(GET_CARD_CATALOG, {
-    variables: { filter },
-  });
-}
+// Catalog browsing is served by the REST endpoint at GET /api/cards
+// (see lib/api/cards.ts). The cardCatalog GraphQL query was removed
+// as part of the catalog-ownership refactor. cardBySlug / cardById
+// remain for saved-deck snapshot backfill.
 
 export function useDecklists(userId: string | null) {
   return useQuery(GET_DECKLISTS, {
