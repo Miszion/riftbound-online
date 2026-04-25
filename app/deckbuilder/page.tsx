@@ -1,13 +1,12 @@
 'use client'
 
 import { useApolloClient } from '@apollo/client'
-import { useCallback, useEffect, useMemo, useState, type DragEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import Image from 'next/image'
 import Header from '@/components/Header'
 import Footer from '@/components/Footer'
 import RequireAuth from '@/components/auth/RequireAuth'
 import {
-  useCardCatalog,
   useDecklists,
   useSaveDecklist,
   useDeleteDecklist,
@@ -15,7 +14,12 @@ import {
 import { useAuth } from '@/hooks/useAuth'
 import LoadingSpinner from '@/components/ui/LoadingSpinner'
 import { GET_CARD_BY_ID, GET_CARD_BY_SLUG } from '@/lib/graphql/queries'
+import { fetchCards, type CatalogCardDTO } from '@/lib/api/cards'
 
+// CatalogCard mirrors the subset of CatalogCardDTO the deckbuilder UI uses.
+// We intentionally narrow rather than alias the DTO so existing call sites
+// keep their non-null guarantees on `colors`, `keywords`, `effect`, and
+// `assets`.
 type CatalogCard = {
   id: string
   slug: string
@@ -34,6 +38,29 @@ type CatalogCard = {
     localPath: string
   }
 }
+
+const dtoToCatalogCard = (dto: CatalogCardDTO): CatalogCard => ({
+  id: dto.id,
+  slug: dto.slug,
+  name: dto.name,
+  type: dto.type ?? null,
+  rarity: dto.rarity ?? null,
+  colors: Array.isArray(dto.colors) ? dto.colors : [],
+  keywords: Array.isArray(dto.keywords) ? dto.keywords : [],
+  effect: dto.effect ?? '',
+  activation: dto.activation
+    ? {
+        timing: dto.activation.timing ?? undefined,
+        stateful: dto.activation.stateful ?? undefined,
+      }
+    : undefined,
+  assets: dto.assets
+    ? {
+        remote: dto.assets.remote ?? null,
+        localPath: dto.assets.localPath ?? '',
+      }
+    : undefined,
+})
 
 type CardSnapshot = {
   cardId?: string | null
@@ -119,7 +146,8 @@ const rarityClass = (card?: CatalogCard | null) => {
 const MIN_DECK_CARDS = 39
 const MAX_DECK_CARDS = MIN_DECK_CARDS
 const MAX_COPIES = 3
-const MAX_RESULTS = 180
+const CATALOG_PAGE_SIZE = 60
+const SEARCH_DEBOUNCE_MS = 250
 const MAIN_DECK_COLUMNS = 10
 const MAIN_DECK_ROWS = 3
 const MAX_MAIN_SLOTS = MAIN_DECK_COLUMNS * MAIN_DECK_ROWS
@@ -164,7 +192,17 @@ function DeckbuilderView() {
   const [didAutoLoadDefault, setDidAutoLoadDefault] = useState(false)
   const [pendingDeleteDeck, setPendingDeleteDeck] = useState<SavedDeck | null>(null)
   const [toasts, setToasts] = useState<ToastMessage[]>([])
-  const catalogLimit = Number.isFinite(MAX_RESULTS) ? (MAX_RESULTS as number) : undefined
+
+  // Catalog state owned by the page. The /api/cards REST endpoint backs this;
+  // the old GraphQL catalog hook plus client-side full-catalog cache were
+  // removed. We keep search debounced so each keystroke does not refetch.
+  const [cards, setCards] = useState<CatalogCard[]>([])
+  const [nextCursor, setNextCursor] = useState<string | null>(null)
+  const [hasMore, setHasMore] = useState(false)
+  const [catalogLoading, setCatalogLoading] = useState(false)
+  const [catalogPaging, setCatalogPaging] = useState(false)
+  const [catalogError, setCatalogError] = useState<Error | null>(null)
+  const [debouncedSearch, setDebouncedSearch] = useState('')
 
   const pushToast = useCallback(
     (message: string, tone: ToastTone = 'info') => {
@@ -181,23 +219,96 @@ function DeckbuilderView() {
     setToasts((prev) => prev.filter((toast) => toast.id !== id))
   }, [])
 
-  const cardCatalogFilter = useMemo(
+  // Debounce the free-text search so each keystroke does not hit /api/cards.
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      setDebouncedSearch(search.trim())
+    }, SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(handle)
+  }, [search])
+
+  const cardListParams = useMemo(
     () => ({
-      limit: catalogLimit,
-      search: search.trim() || undefined,
       domain: domainFilter !== 'all' ? domainFilter : undefined,
       type: typeFilter !== 'all' ? typeFilter : undefined,
       rarity: rarityFilter !== 'all' ? rarityFilter : undefined,
+      q: debouncedSearch || undefined,
+      limit: CATALOG_PAGE_SIZE,
     }),
-    [catalogLimit, search, domainFilter, typeFilter, rarityFilter]
+    [domainFilter, typeFilter, rarityFilter, debouncedSearch]
   )
 
-  const {
-    data: catalogData,
-    loading: catalogLoading,
-    error: catalogError,
-  } = useCardCatalog(cardCatalogFilter)
-  const cards: CatalogCard[] = catalogData?.cardCatalog ?? []
+  // Track the current request so a later filter change can abort an in-flight
+  // initial fetch and a Load More click can be safely sequenced.
+  const fetchAbortRef = useRef<AbortController | null>(null)
+
+  // Initial / filter-change fetch: resets the result list and cursor.
+  useEffect(() => {
+    fetchAbortRef.current?.abort()
+    const controller = new AbortController()
+    fetchAbortRef.current = controller
+    setCatalogLoading(true)
+    setCatalogError(null)
+    fetchCards(cardListParams, controller.signal)
+      .then((res) => {
+        if (controller.signal.aborted) {
+          return
+        }
+        setCards(res.items.map(dtoToCatalogCard))
+        setNextCursor(res.pageInfo.nextCursor)
+        setHasMore(Boolean(res.pageInfo.hasMore))
+      })
+      .catch((error: unknown) => {
+        if ((error as { name?: string })?.name === 'AbortError') {
+          return
+        }
+        console.error('Failed to load card catalog', error)
+        setCatalogError(error instanceof Error ? error : new Error(String(error)))
+        setCards([])
+        setNextCursor(null)
+        setHasMore(false)
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setCatalogLoading(false)
+        }
+      })
+    return () => {
+      controller.abort()
+    }
+  }, [cardListParams])
+
+  const handleLoadMoreCards = useCallback(async () => {
+    if (!nextCursor || !hasMore || catalogPaging) {
+      return
+    }
+    const controller = new AbortController()
+    setCatalogPaging(true)
+    try {
+      const res = await fetchCards(
+        { ...cardListParams, cursor: nextCursor },
+        controller.signal
+      )
+      setCards((prev) => {
+        const seen = new Set(prev.map((card) => card.id))
+        const appended = res.items
+          .map(dtoToCatalogCard)
+          .filter((card) => !seen.has(card.id))
+        return [...prev, ...appended]
+      })
+      setNextCursor(res.pageInfo.nextCursor)
+      setHasMore(Boolean(res.pageInfo.hasMore))
+    } catch (error) {
+      if ((error as { name?: string })?.name === 'AbortError') {
+        return
+      }
+      console.error('Failed to paginate card catalog', error)
+      setCatalogError(error instanceof Error ? error : new Error(String(error)))
+    } finally {
+      setCatalogPaging(false)
+    }
+  }, [cardListParams, nextCursor, hasMore, catalogPaging])
+
   const cardLookup = useMemo(() => {
     const map = new Map<string, CatalogCard>()
     cards.forEach((card) => map.set(card.id, card))
@@ -301,21 +412,9 @@ function DeckbuilderView() {
     battlefieldsComplete &&
     sideDeckWithinLimit
 
-  const filteredCards = useMemo(() => {
-    const effectiveLimit = catalogLimit ?? cards.length
-    if (!search.trim()) {
-      return cards.slice(0, effectiveLimit)
-    }
-    const term = search.trim().toLowerCase()
-    return cards
-      .filter((card) => {
-        const matchesName = card.name.toLowerCase().includes(term)
-        const matchesEffect = card.effect.toLowerCase().includes(term)
-        const matchesKeywords = card.keywords?.some((keyword) => keyword.toLowerCase().includes(term))
-        return matchesName || matchesEffect || matchesKeywords
-      })
-      .slice(0, effectiveLimit)
-  }, [cards, search, catalogLimit])
+  // Backend filters by q/domain/type/rarity; cards is already the filtered
+  // result set. We expose it under the same name to keep the JSX below stable.
+  const filteredCards = cards
 
   const resolveCatalogCard = useCallback(
     (entry?: DeckCardDTO | null) => {
@@ -532,12 +631,15 @@ function DeckbuilderView() {
   )
 
   useEffect(() => {
-    if (!pendingDeck || !cards.length) {
+    if (!pendingDeck) {
       return
     }
     let cancelled = false
     ;(async () => {
       try {
+        // Hydrate uses GraphQL cardBySlug / cardById to pull authoritative
+        // card metadata for any deck entry missing a snapshot. We no longer
+        // depend on a full client-side catalog being loaded first.
         const hydrated = await hydrateDeckSnapshots(pendingDeck)
         if (!cancelled) {
           restoreDeckFromSaved(hydrated)
@@ -550,7 +652,7 @@ function DeckbuilderView() {
     return () => {
       cancelled = true
     }
-  }, [pendingDeck, cards.length, restoreDeckFromSaved, hydrateDeckSnapshots])
+  }, [pendingDeck, restoreDeckFromSaved, hydrateDeckSnapshots])
 
 
   const isRuneCard = (card: CatalogCard) => {
@@ -1855,6 +1957,18 @@ const handleAddCard = (card: CatalogCard, target: 'main' | 'rune' | 'side' = 'ma
               ))}
               {!filteredCards.length && !catalogLoading && (
                 <p className="muted small">No cards match your filters.</p>
+              )}
+              {hasMore && (
+                <div className="search-results-pager">
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    onClick={handleLoadMoreCards}
+                    disabled={catalogPaging || catalogLoading}
+                  >
+                    {catalogPaging ? 'Loading...' : 'Load more'}
+                  </button>
+                </div>
               )}
             </div>
           </aside>

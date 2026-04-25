@@ -1117,28 +1117,10 @@ export const CONCEDE_MATCH = gql`
 // CARD CATALOG & DECKLIST QUERIES
 // ============================================================================
 
-export const GET_CARD_CATALOG = gql`
-  query CardCatalog($filter: CardCatalogFilter) {
-    cardCatalog(filter: $filter) {
-      id
-      slug
-      name
-      type
-      rarity
-      colors
-      keywords
-      effect
-      activation {
-        timing
-        stateful
-      }
-      assets {
-        remote
-        localPath
-      }
-    }
-  }
-`;
+// The bulk card-catalog GraphQL query was removed in the catalog-ownership
+// refactor. Catalog listing is now served by GET /api/cards
+// (see lib/api/cards.ts). cardBySlug / cardById remain below for saved-deck
+// snapshot backfill.
 
 export const GET_CARD_BY_SLUG = gql`
   query CardBySlug($slug: String!) {
