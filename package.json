@@ -8,7 +8,9 @@
     "build:static": "next build",
     "deploy:dev": "scripts/deploy-ui.sh",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "install-hooks": "sh scripts/install-hooks.sh",
+    "postinstall": "sh scripts/install-hooks.sh"
   },
   "dependencies": {
     "@apollo/client": "^3.9.0",
