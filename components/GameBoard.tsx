@@ -2915,6 +2915,19 @@ export function GameBoard({ matchId, playerId, replay, spectator }: GameBoardPro
   const lastOpponentTurnHolderRef = useRef<string | null>(null);
   const lastOpponentPriorityHolderRef = useRef<string | null>(null);
   const combatFocusRef = useRef(false);
+  const handledEventKeysRef = useRef<Set<string>>(new Set());
+  const claimEventKey = useCallback((key: string) => {
+    if (handledEventKeysRef.current.has(key)) {
+      return false;
+    }
+    handledEventKeysRef.current.add(key);
+    if (handledEventKeysRef.current.size > 500) {
+      handledEventKeysRef.current = new Set(
+        Array.from(handledEventKeysRef.current).slice(-250)
+      );
+    }
+    return true;
+  }, []);
   const [matchInitRetries, setMatchInitRetries] = useState(0);
   const [playerDeckOrder, setPlayerDeckOrder] = useState<string[]>([]);
   const [opponentDeckOrder, setOpponentDeckOrder] = useState<string[]>([]);
@@ -3519,6 +3532,9 @@ export function GameBoard({ matchId, playerId, replay, spectator }: GameBoardPro
     ]
       .filter(Boolean)
       .join(':');
+    if (!claimEventKey(persistKey)) {
+      return;
+    }
     notify(`${actor} played ${cardName}.`, 'info', {
       persist: true,
       persistKey,
@@ -3526,7 +3542,7 @@ export function GameBoard({ matchId, playerId, replay, spectator }: GameBoardPro
       actorName: actor,
       timestamp: cardPlayedEvent.timestamp,
     });
-  }, [cardPlayedEvent, notify, resolvePlayerLabel]);
+  }, [cardPlayedEvent, claimEventKey, notify, resolvePlayerLabel]);
 
   const attackDeclaredEvent = attackDeclaredData?.attackDeclared ?? null;
   useEffect(() => {
@@ -3545,6 +3561,9 @@ export function GameBoard({ matchId, playerId, replay, spectator }: GameBoardPro
     ]
       .filter(Boolean)
       .join(':');
+    if (!claimEventKey(persistKey)) {
+      return;
+    }
     notify(`${actor} launched an attack on ${destinationLabel}.`, 'warning', {
       persist: true,
       persistKey,
@@ -3552,7 +3571,7 @@ export function GameBoard({ matchId, playerId, replay, spectator }: GameBoardPro
       actorName: actor,
       timestamp: attackDeclaredEvent.timestamp,
     });
-  }, [attackDeclaredEvent, notify, resolvePlayerLabel]);
+  }, [attackDeclaredEvent, claimEventKey, notify, resolvePlayerLabel]);
 
   const phaseChangedEvent = phaseChangedData?.phaseChanged ?? null;
   useEffect(() => {
@@ -3563,13 +3582,16 @@ export function GameBoard({ matchId, playerId, replay, spectator }: GameBoardPro
     const persistKey = ['phase', phaseChangedEvent.timestamp, phaseChangedEvent.newPhase]
       .filter(Boolean)
       .join(':');
+    if (!claimEventKey(persistKey)) {
+      return;
+    }
     notify(`Turn ${phaseChangedEvent.turnNumber}: ${phaseLabel} phase`, 'info', {
       persist: true,
       persistKey,
       actorId: null,
       timestamp: phaseChangedEvent.timestamp,
     });
-  }, [friendlyStatus, notify, phaseChangedEvent]);
+  }, [claimEventKey, friendlyStatus, notify, phaseChangedEvent]);
 
   const prompts = spectatorState?.prompts ?? [];
   const myPrompts = prompts.filter(
@@ -7411,7 +7433,13 @@ export function GameBoard({ matchId, playerId, replay, spectator }: GameBoardPro
             // 1. It was set on a previous turn (not this turn)
             // 2. The player can currently act (their turn OR they're the reaction window holder)
             const hiddenCardReady = hiddenCard && hiddenCard.hiddenOnTurn !== currentTurnNumber;
-            const canActivateHidden = hiddenCardReady && canAct;
+            // Hidden cards activate at reaction speed: also allow when this
+            // player is the current reactor in an open reaction window, even
+            // though canAct is false on the opponent's turn.
+            const isCurrentReactor =
+              Boolean(reactionChain?.awaitingResponse) &&
+              reactionChain?.currentReactorId === playerId;
+            const canActivateHidden = hiddenCardReady && (canAct || isCurrentReactor);
             // Check if a hand card being dragged can be hidden here (reuse draggingHandCard from above)
             const canHideDraggedCardHere = draggingHandCard && canHideCardToBattlefield(draggingHandCard, field.battlefieldId);
             const isHiddenSlotDragHover = canHideDraggedCardHere && dragOverHiddenSlotId === field.battlefieldId;
